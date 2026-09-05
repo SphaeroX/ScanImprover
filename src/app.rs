@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
+pub(crate) enum Mode {
     Orbit,
     BrushAdd,
     BrushErase,
@@ -22,74 +22,75 @@ enum Mode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum DecMode {
+pub(crate) enum DecMode {
     Fixed,
     Accuracy,
     Deviation,
 }
 
 #[derive(Clone)]
-struct Snapshot {
-    current: Arc<Mesh>,
-    original: Arc<Mesh>,
-    sel: Arc<Vec<u8>>,
-    sym: Option<SymState>,
-    plane: Option<PlaneFit>,
-    circle: Option<CircleFit>,
+pub(crate) struct Snapshot {
+    pub(crate) current: Arc<Mesh>,
+    pub(crate) original: Arc<Mesh>,
+    pub(crate) sel: Arc<Vec<u8>>,
+    pub(crate) sym: Option<SymState>,
+    pub(crate) plane: Option<PlaneFit>,
+    pub(crate) circle: Option<CircleFit>,
 }
 
 #[derive(Clone, Copy)]
-struct SymState {
-    plane: SymPlane,
-    rms: f64,
-    show: bool,
+pub(crate) struct SymState {
+    pub(crate) plane: SymPlane,
+    pub(crate) rms: f64,
+    pub(crate) show: bool,
 }
 
 pub struct App {
-    gpu: Option<Arc<Mutex<GpuState>>>,
-    camera: Camera,
-    current: Option<Arc<Mesh>>,
-    original: Option<Arc<Mesh>>,
-    preview: Option<Arc<Mesh>>,
-    preview_error: f32,
-    sel: Arc<Vec<u8>>,
-    sel_count: usize,
-    bvh: Option<Arc<Bvh>>,
-    bbox: Aabb,
-    worker: Worker,
-    mode: Mode,
-    brush_radius: f32,
-    dec_mode: DecMode,
-    dec_ratio: f32,
-    dec_error_mm: f32,
-    dec_target_acc: f32,
-    dec_target_mm: f32,
-    dec_lock_border: bool,
-    dec_auto_preview: bool,
-    dec_job: Option<u64>,
-    dev_job: Option<u64>,
-    sym_job: Option<u64>,
-    bvh_job: Option<u64>,
-    bvh_job_mesh: Option<Arc<Mesh>>,
-    deviation: Option<Deviation>,
-    heat: Option<Arc<Vec<f32>>>,
-    heat_on: bool,
-    heat_max: f32,
-    sym: Option<SymState>,
-    sym_pick: Vec<Vec3>,
-    plane: Option<PlaneFit>,
-    show_plane: bool,
-    circle: Option<CircleFit>,
-    show_circle: bool,
-    show_wireframe: bool,
-    show_bbox: bool,
-    show_triad: bool,
-    undo: Vec<Snapshot>,
-    status: String,
-    file_path: Option<PathBuf>,
-    mesh_dirty: bool,
-    aux_dirty: bool,
-    wire_dirty: bool,
+    pub(crate) gpu: Option<Arc<Mutex<GpuState>>>,
+    pub(crate) camera: Camera,
+    pub(crate) current: Option<Arc<Mesh>>,
+    pub(crate) original: Option<Arc<Mesh>>,
+    pub(crate) preview: Option<Arc<Mesh>>,
+    pub(crate) preview_error: f32,
+    pub(crate) sel: Arc<Vec<u8>>,
+    pub(crate) sel_count: usize,
+    pub(crate) bvh: Option<Arc<Bvh>>,
+    pub(crate) bbox: Aabb,
+    pub(crate) worker: Worker,
+    pub(crate) mode: Mode,
+    pub(crate) brush_radius: f32,
+    pub(crate) dec_mode: DecMode,
+    pub(crate) dec_ratio: f32,
+    pub(crate) dec_error_mm: f32,
+    pub(crate) dec_target_acc: f32,
+    pub(crate) dec_target_mm: f32,
+    pub(crate) dec_lock_border: bool,
+    pub(crate) dec_auto_preview: bool,
+    pub(crate) dec_job: Option<u64>,
+    pub(crate) dev_job: Option<u64>,
+    pub(crate) sym_job: Option<u64>,
+    pub(crate) bvh_job: Option<u64>,
+    pub(crate) bvh_job_mesh: Option<Arc<Mesh>>,
+    pub(crate) deviation: Option<Deviation>,
+    pub(crate) heat: Option<Arc<Vec<f32>>>,
+    pub(crate) heat_on: bool,
+    pub(crate) heat_max: f32,
+    pub(crate) sym: Option<SymState>,
+    pub(crate) sym_pick: Vec<Vec3>,
+    pub(crate) plane: Option<PlaneFit>,
+    pub(crate) show_plane: bool,
+    pub(crate) circle: Option<CircleFit>,
+    pub(crate) show_circle: bool,
+    pub(crate) show_wireframe: bool,
+    pub(crate) show_bbox: bool,
+    pub(crate) show_triad: bool,
+    pub(crate) undo: Vec<Snapshot>,
+    pub(crate) status: String,
+    pub(crate) file_path: Option<PathBuf>,
+    pub(crate) mesh_dirty: bool,
+    pub(crate) aux_dirty: bool,
+    pub(crate) wire_dirty: bool,
+    pub(crate) active_section: Option<crate::ui::ToolSection>,
 }
 
 impl App {
@@ -143,6 +144,7 @@ impl App {
             mesh_dirty: false,
             aux_dirty: false,
             wire_dirty: false,
+            active_section: Some(crate::ui::ToolSection::Decimation),
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -153,11 +155,11 @@ impl App {
         app
     }
 
-    fn display(&self) -> Option<&Arc<Mesh>> {
+    pub(crate) fn display(&self) -> Option<&Arc<Mesh>> {
         self.preview.as_ref().or(self.current.as_ref())
     }
 
-    fn orig_mesh(&self) -> Option<&Arc<Mesh>> {
+    pub(crate) fn orig_mesh(&self) -> Option<&Arc<Mesh>> {
         self.original.as_ref()
     }
 
@@ -177,7 +179,7 @@ impl App {
         }
     }
 
-    fn undo(&mut self) {
+    pub(crate) fn undo(&mut self) {
         if let Some(s) = self.undo.pop() {
             self.current = Some(s.current);
             self.original = Some(s.original);
@@ -197,7 +199,7 @@ impl App {
         }
     }
 
-    fn recount_sel(&mut self) {
+    pub(crate) fn recount_sel(&mut self) {
         self.sel_count = self.sel.iter().filter(|&&v| v > 0).count();
     }
 
@@ -336,7 +338,7 @@ impl App {
         self.sync_bbox();
     }
 
-    fn schedule_decimate(&mut self) {
+    pub(crate) fn schedule_decimate(&mut self) {
         if let Some(m) = self.orig_mesh().cloned() {
             let id = self
                 .worker
@@ -346,7 +348,7 @@ impl App {
         }
     }
 
-    fn run_auto_decimate(&mut self) {
+    pub(crate) fn run_auto_decimate(&mut self) {
         if self.dec_job.is_some() {
             return;
         }
@@ -452,21 +454,21 @@ impl App {
         let _ = ctx;
     }
 
-    fn schedule_sym_auto(&mut self) {
+    pub(crate) fn schedule_sym_auto(&mut self) {
         if let Some(m) = self.display().cloned() {
             self.sym_job = Some(self.worker.submit_symmetry(m, None));
             self.status = "Detecting symmetry plane…".to_string();
         }
     }
 
-    fn schedule_sym_refine(&mut self, init: SymPlane) {
+    pub(crate) fn schedule_sym_refine(&mut self, init: SymPlane) {
         if let Some(m) = self.display().cloned() {
             self.sym_job = Some(self.worker.submit_symmetry(m, Some(init)));
             self.status = "Optimizing symmetry plane…".to_string();
         }
     }
 
-    fn rotate_normal_to_axis(&mut self, axis: Vec3) {
+    pub(crate) fn rotate_normal_to_axis(&mut self, axis: Vec3) {
         if let Some(n) = self.sym.map(|s| s.plane.normal).or(self.plane.map(|p| p.normal)) {
             let q = rotation_between(n, axis);
             self.apply_transform(q, Vec3::ZERO);
@@ -474,7 +476,7 @@ impl App {
         }
     }
 
-    fn circle_axis_to(&mut self, axis: Vec3) {
+    pub(crate) fn circle_axis_to(&mut self, axis: Vec3) {
         if let Some(c) = self.circle {
             let q = rotation_between(c.normal, axis);
             self.apply_transform(q, Vec3::ZERO);
@@ -482,7 +484,7 @@ impl App {
         }
     }
 
-    fn origin_on_plane(&mut self) {
+    pub(crate) fn origin_on_plane(&mut self) {
         if let Some(p) = self.plane {
             let d = p.point.dot(p.normal);
             self.apply_transform(Quat::IDENTITY, -p.normal * d);
@@ -490,7 +492,7 @@ impl App {
         }
     }
 
-    fn origin_at_symmetry(&mut self) {
+    pub(crate) fn origin_at_symmetry(&mut self) {
         if let Some(s) = self.sym {
             let d = s.plane.point.dot(s.plane.normal);
             self.apply_transform(Quat::IDENTITY, -s.plane.normal * d);
@@ -499,14 +501,14 @@ impl App {
         }
     }
 
-    fn origin_at_circle_center(&mut self) {
+    pub(crate) fn origin_at_circle_center(&mut self) {
         if let Some(c) = self.circle {
             self.apply_transform(Quat::IDENTITY, -c.center);
             self.status = "Origin moved to the circle center.".to_string();
         }
     }
 
-    fn center_axes(&mut self, x: bool, y: bool, z: bool) {
+    pub(crate) fn center_axes(&mut self, x: bool, y: bool, z: bool) {
         let c = self.bbox.center();
         let mut t = Vec3::ZERO;
         if x {
@@ -534,7 +536,7 @@ impl App {
         }
     }
 
-    fn fit_plane_from_selection(&mut self) {
+    pub(crate) fn fit_plane_from_selection(&mut self) {
         let points = self.selection_points();
         match points.map(|p| fit_plane(&p)) {
             Some(Some(f)) => {
@@ -551,7 +553,7 @@ impl App {
         }
     }
 
-    fn fit_circle_from_selection(&mut self) {
+    pub(crate) fn fit_circle_from_selection(&mut self) {
         let points = self.selection_points();
         match points.map(|p| fit_circle(&p)) {
             Some(Some(c)) => {
@@ -589,7 +591,7 @@ impl App {
         }
     }
 
-    fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         if let Some(m) = self.display() {
             if self.sel.len() == m.triangle_count() {
                 let sel = Arc::make_mut(&mut self.sel);
@@ -600,7 +602,7 @@ impl App {
         }
     }
 
-    fn apply_preview(&mut self) {
+    pub(crate) fn apply_preview(&mut self) {
         if let Some(p) = self.preview.clone() {
             self.push_snapshot();
             self.current = Some(p.clone());
@@ -618,7 +620,7 @@ impl App {
         }
     }
 
-    fn discard_preview(&mut self) {
+    pub(crate) fn discard_preview(&mut self) {
         self.preview = None;
         self.deviation = None;
         self.heat = None;
@@ -632,7 +634,7 @@ impl App {
         self.status = "Preview discarded.".to_string();
     }
 
-    fn reset_mesh(&mut self) {
+    pub(crate) fn reset_mesh(&mut self) {
         if let Some(orig) = self.original.clone() {
             self.push_snapshot();
             let tris = orig.triangle_count();
@@ -652,7 +654,7 @@ impl App {
     }
 }
 
-fn rotation_between(from: Vec3, to: Vec3) -> Quat {
+pub(crate) fn rotation_between(from: Vec3, to: Vec3) -> Quat {
     let f = from.normalize_or_zero();
     let t = to.normalize_or_zero();
     if f.length_squared() < 1e-12 {
@@ -670,7 +672,7 @@ fn rotation_between(from: Vec3, to: Vec3) -> Quat {
     Quat::from_rotation_arc(f, t)
 }
 
-fn axis_name(a: Vec3) -> &'static str {
+pub(crate) fn axis_name(a: Vec3) -> &'static str {
     if a == Vec3::X {
         "X"
     } else if a == Vec3::Y {
@@ -841,413 +843,7 @@ impl App {
         });
     }
 
-    fn active_tool_section(&mut self, ui: &mut egui::Ui) {
-        let (name, desc, accent) = match self.mode {
-            Mode::Orbit => (
-                "ORBIT",
-                "LMB drag = orbit · MMB = pan · wheel = zoom".to_string(),
-                (110, 140, 255),
-            ),
-            Mode::BrushAdd => (
-                "SELECT",
-                "LMB drag = paint-select faces under the brush".to_string(),
-                (255, 150, 40),
-            ),
-            Mode::BrushErase => (
-                "ERASE",
-                "LMB drag = erase faces from the selection".to_string(),
-                (255, 70, 70),
-            ),
-            Mode::SymPickLine => (
-                "PICK LINE",
-                format!(
-                    "Click point {} of 2 on the mesh · Esc = cancel",
-                    self.sym_pick.len() + 1
-                ),
-                (40, 220, 255),
-            ),
-        };
-        let bg = egui::Color32::from_rgba_unmultiplied(accent.0, accent.1, accent.2, 30);
-        let fg = egui::Color32::from_rgb(accent.0, accent.1, accent.2);
-        egui::Frame::new()
-            .fill(bg)
-            .corner_radius(6.0)
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(name).strong().size(19.0).color(fg));
-                ui.label(desc);
-            });
-        ui.add_space(6.0);
-        let mut new_mode = None;
-        ui.horizontal(|ui| {
-            if ui.button("Orbit").clicked() {
-                new_mode = Some(Mode::Orbit);
-            }
-            if ui.button("Select").clicked() {
-                new_mode = Some(Mode::BrushAdd);
-            }
-            if ui.button("Erase").clicked() {
-                new_mode = Some(Mode::BrushErase);
-            }
-            if ui.button("Pick Line").clicked() {
-                new_mode = Some(Mode::SymPickLine);
-            }
-        });
-        if let Some(m) = new_mode {
-            if m != self.mode {
-                self.sym_pick.clear();
-                self.mode = m;
-            }
-        }
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-    }
-
-    fn tool_panel(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.active_tool_section(ui);
-            ui.heading("Decimation");
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.dec_mode, DecMode::Fixed, "Fixed mm");
-                ui.selectable_value(&mut self.dec_mode, DecMode::Accuracy, "Auto %");
-                ui.selectable_value(&mut self.dec_mode, DecMode::Deviation, "Auto mm");
-            });
-            ui.checkbox(&mut self.dec_lock_border, "Lock open borders");
-            let mut schedule_manual = false;
-            match self.dec_mode {
-                DecMode::Fixed => {
-                    let err_resp = ui.add(
-                        egui::Slider::new(&mut self.dec_error_mm, 0.0001..=1.0)
-                            .logarithmic(true)
-                            .text("Error tolerance (mm)"),
-                    );
-                    let ratio_resp = ui.add(
-                        egui::Slider::new(&mut self.dec_ratio, 0.002..=1.0)
-                            .text("Target triangle ratio"),
-                    );
-                    ui.checkbox(&mut self.dec_auto_preview, "Auto preview on change");
-                    ui.horizontal(|ui| {
-                        if ui.button("Preview now").clicked() {
-                            schedule_manual = true;
-                        }
-                        if self.dec_job.is_some() {
-                            ui.add(egui::Spinner::new());
-                            ui.label("working…");
-                        }
-                    });
-                    if err_resp.drag_stopped() || ratio_resp.drag_stopped() {
-                        if self.dec_auto_preview && self.dec_job.is_none() {
-                            schedule_manual = true;
-                        }
-                    }
-                }
-                DecMode::Accuracy | DecMode::Deviation => {
-                    let diag = self.bbox.diagonal().max(1e-9);
-                    if self.dec_mode == DecMode::Accuracy {
-                        let mut acc = self.dec_target_acc;
-                        let resp = ui
-                            .add(
-                                egui::DragValue::new(&mut acc)
-                                    .range(90.0..=99.9999)
-                                    .speed(0.02)
-                                    .prefix("target ≥ ")
-                                    .suffix(" %")
-                                    .fixed_decimals(3),
-                            );
-                        if resp.changed() {
-                            self.dec_target_acc = acc;
-                            self.dec_target_mm = ((1.0 - acc / 100.0) * diag).max(1e-6);
-                        }
-                    } else {
-                        let mut mm = self.dec_target_mm;
-                        let resp = ui.add(
-                            egui::DragValue::new(&mut mm)
-                                .range(0.0001..=10.0)
-                                .speed(0.01)
-                                .prefix("target ≤ ")
-                                .suffix(" mm")
-                                .fixed_decimals(4),
-                        );
-                        if resp.changed() {
-                            self.dec_target_mm = mm;
-                            self.dec_target_acc = 100.0 * (1.0 - mm / diag);
-                        }
-                    }
-                    ui.label(format!(
-                        "Goal: max deviation {:.4} mm = {:.4} % accuracy",
-                        self.dec_target_mm, self.dec_target_acc
-                    ));
-                    ui.horizontal(|ui| {
-                        if ui.button("Auto decimate").clicked() {
-                            self.run_auto_decimate();
-                        }
-                        if self.dec_job.is_some() {
-                            ui.add(egui::Spinner::new());
-                            ui.label("working…");
-                        }
-                    });
-                }
-            }
-            if self.preview.is_some() {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("✔ Apply decimation")
-                        .clicked()
-                    {
-                        self.apply_preview();
-                    }
-                    if ui.button("✖ Discard").clicked() {
-                        self.discard_preview();
-                    }
-                });
-            }
-            if let (Some(orig), Some(prev)) = (self.orig_mesh(), self.preview.as_ref()) {
-                ui.add_space(4.0);
-                ui.label(format!(
-                    "Triangles: {} → {} ({:.1}%)",
-                    orig.triangle_count(),
-                    prev.triangle_count(),
-                    100.0 * prev.triangle_count() as f32 / orig.triangle_count().max(1) as f32
-                ));
-                ui.label(format!("Simplifier error estimate: {:.4} mm", self.preview_error));
-                if let Some(dev) = &self.deviation {
-                    if self.dev_job.is_some() && self.dec_mode == DecMode::Fixed {
-                        ui.label("Measuring deviation…");
-                    } else {
-                        let diag = self.bbox.diagonal();
-                        let acc = 100.0 * (1.0 - dev.max_dev / diag.max(1e-9));
-                        ui.label(format!("Max deviation: {:.4} mm", dev.max_dev));
-                        ui.label(format!("RMS deviation: {:.4} mm", dev.rms));
-                        ui.label(format!("Contour match: {:.5}%", acc));
-                        ui.label(format!("Measured on {} source points", dev.count));
-                    }
-                }
-                ui.checkbox(&mut self.heat_on, "Deviation heatmap");
-            }
-            if schedule_manual && self.dec_job.is_none() {
-                self.schedule_decimate();
-            }
-
-            ui.separator();
-            ui.heading("Symmetry plane");
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("Auto-detect").clicked() {
-                    self.schedule_sym_auto();
-                }
-                let pick_label = if self.mode == Mode::SymPickLine {
-                    "Pick line: ON"
-                } else {
-                    "Pick line"
-                };
-                if ui.button(pick_label).clicked() {
-                    self.sym_pick.clear();
-                    self.mode = if self.mode == Mode::SymPickLine {
-                        Mode::Orbit
-                    } else {
-                        Mode::SymPickLine
-                    };
-                }
-                if self.sym_job.is_some() {
-                    ui.add(egui::Spinner::new());
-                }
-            });
-            let sym_copy = self.sym;
-            if sym_copy.is_some() {
-                let mut show = sym_copy.unwrap().show;
-                if ui.checkbox(&mut show, "Show plane").changed() {
-                    if let Some(s) = &mut self.sym {
-                        s.show = show;
-                    }
-                }
-                let rms = sym_copy.unwrap().rms;
-                if rms.is_finite() {
-                    ui.label(format!("RMS: {:.4} mm", rms));
-                } else {
-                    ui.label("Optimizing plane…");
-                }
-                let mut refine = false;
-                let mut to_origin = false;
-                let mut align_axis = None;
-                ui.horizontal(|ui| {
-                    if ui.button("Optimize").clicked() {
-                        refine = true;
-                    }
-                    if ui.button("Origin → plane").clicked() {
-                        to_origin = true;
-                    }
-                });
-                ui.label("Align symmetry to:");
-                ui.horizontal(|ui| {
-                    if ui.button("X = 0").clicked() {
-                        align_axis = Some(Vec3::X);
-                    }
-                    if ui.button("Y = 0").clicked() {
-                        align_axis = Some(Vec3::Y);
-                    }
-                    if ui.button("Z = 0").clicked() {
-                        align_axis = Some(Vec3::Z);
-                    }
-                });
-                let sp = sym_copy.unwrap().plane;
-                if refine {
-                    self.schedule_sym_refine(sp);
-                }
-                if to_origin {
-                    self.origin_at_symmetry();
-                }
-                if let Some(axis) = align_axis {
-                    let q = rotation_between(sp.normal, axis);
-                    self.align_sym_full(axis, q);
-                }
-            }
-
-            ui.separator();
-            ui.heading("Face selection");
-            ui.add_space(4.0);
-            ui.add(
-                egui::Slider::new(&mut self.brush_radius, 2.0..=150.0).text("Brush radius (px)"),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Clear").clicked() {
-                    self.clear_selection();
-                }
-                if ui.button("Invert").clicked() {
-                    if let Some(m) = self.display() {
-                        if self.sel.len() == m.triangle_count() {
-                            let sel = Arc::make_mut(&mut self.sel);
-                            for v in sel.iter_mut() {
-                                *v = if *v > 0 { 0 } else { 1 };
-                            }
-                            self.recount_sel();
-                            self.aux_dirty = true;
-                        }
-                    }
-                }
-                ui.label(format!("{} faces", self.sel_count));
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Fit plane").clicked() {
-                    self.fit_plane_from_selection();
-                }
-                if ui.button("Fit circle").clicked() {
-                    self.fit_circle_from_selection();
-                }
-            });
-            let plane_copy = self.plane;
-            if plane_copy.is_some() {
-                let p = plane_copy.unwrap();
-                ui.add_space(4.0);
-                ui.checkbox(&mut self.show_plane, "Show plane");
-                ui.label(format!(
-                    "Plane  N ({:.3}, {:.3}, {:.3})  off {:.3} mm",
-                    p.normal.x,
-                    p.normal.y,
-                    p.normal.z,
-                    p.point.dot(p.normal)
-                ));
-                ui.label(format!(
-                    "RMS {:.4} mm · max {:.4} mm",
-                    p.rms.sqrt(),
-                    p.max_dev
-                ));
-                let mut axis = None;
-                let mut origin = false;
-                ui.horizontal(|ui| {
-                    if ui.button("N → X").clicked() {
-                        axis = Some(Vec3::X);
-                    }
-                    if ui.button("N → Y").clicked() {
-                        axis = Some(Vec3::Y);
-                    }
-                    if ui.button("N → Z").clicked() {
-                        axis = Some(Vec3::Z);
-                    }
-                    if ui.button("Origin on plane").clicked() {
-                        origin = true;
-                    }
-                });
-                if let Some(a) = axis {
-                    self.rotate_normal_to_axis(a);
-                }
-                if origin {
-                    self.origin_on_plane();
-                }
-            }
-            let circle_copy = self.circle;
-            if circle_copy.is_some() {
-                let c = circle_copy.unwrap();
-                ui.add_space(4.0);
-                ui.checkbox(&mut self.show_circle, "Show circle");
-                ui.label(format!(
-                    "Circle R = {:.4} mm, center ({:.2}, {:.2}, {:.2})",
-                    c.radius, c.center.x, c.center.y, c.center.z
-                ));
-                ui.label(format!(
-                    "Radial RMS {:.4} mm · plane RMS {:.4} mm · max {:.4} mm",
-                    c.radial_rms.sqrt(),
-                    c.plane_rms.sqrt(),
-                    c.radial_max
-                ));
-                let mut axis = None;
-                let mut origin = false;
-                ui.horizontal(|ui| {
-                    if ui.button("Axis → X").clicked() {
-                        axis = Some(Vec3::X);
-                    }
-                    if ui.button("Axis → Y").clicked() {
-                        axis = Some(Vec3::Y);
-                    }
-                    if ui.button("Axis → Z").clicked() {
-                        axis = Some(Vec3::Z);
-                    }
-                    if ui.button("Origin at center").clicked() {
-                        origin = true;
-                    }
-                });
-                if let Some(a) = axis {
-                    self.circle_axis_to(a);
-                }
-                if origin {
-                    self.origin_at_circle_center();
-                }
-            }
-
-            ui.separator();
-            ui.heading("Coordinate system");
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("Center X").clicked() {
-                    self.center_axes(true, false, false);
-                }
-                if ui.button("Center Y").clicked() {
-                    self.center_axes(false, true, false);
-                }
-                if ui.button("Center Z").clicked() {
-                    self.center_axes(false, false, true);
-                }
-                if ui.button("Center all").clicked() {
-                    self.center_axes(true, true, true);
-                }
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Undo").clicked() {
-                    self.undo();
-                }
-                if ui.button("Reset mesh").clicked() {
-                    self.reset_mesh();
-                }
-                ui.label(format!("{} undo steps", self.undo.len()));
-            });
-        });
-    }
-
-    fn align_sym_full(&mut self, axis: Vec3, q: Quat) {
+    pub(crate) fn align_sym_full(&mut self, axis: Vec3, q: Quat) {
         self.apply_transform(q, Vec3::ZERO);
         if let Some(s) = &self.sym {
             let d = s.plane.point.dot(s.plane.normal);
@@ -1621,7 +1217,7 @@ impl eframe::App for App {
             .min_size(280.0)
             .max_size(440.0)
             .show(ui, |ui| {
-                self.tool_panel(ui);
+                crate::ui::render_left_panel(self, ui);
             });
         egui::CentralPanel::default().show(ui, |ui| {
             self.viewport(ui);

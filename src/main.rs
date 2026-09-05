@@ -8,6 +8,7 @@ mod pick;
 mod render;
 mod rng;
 mod tests;
+mod ui;
 mod worker;
 
 fn main() -> Result<(), eframe::Error> {
