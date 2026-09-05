@@ -7,7 +7,7 @@ use crate::io;
 use crate::mesh::{Aabb, Mesh};
 use crate::pick;
 use crate::render::GpuState;
-use crate::worker::{JobResult, Worker};
+use crate::worker::{JobResult, SymmetryJobKind, Worker};
 use eframe::egui;
 use glam::{Quat, Vec3};
 use std::path::PathBuf;
@@ -77,6 +77,7 @@ pub struct App {
     pub(crate) heat_max: f32,
     pub(crate) sym: Option<SymState>,
     pub(crate) sym_pick: Vec<Vec3>,
+    pub(crate) sym_exclude_selection: bool,
     pub(crate) plane: Option<PlaneFit>,
     pub(crate) show_plane: bool,
     pub(crate) circle: Option<CircleFit>,
@@ -130,6 +131,7 @@ impl App {
             heat_max: 1.0,
             sym: None,
             sym_pick: Vec::new(),
+            sym_exclude_selection: true,
             plane: None,
             show_plane: true,
             circle: None,
@@ -456,14 +458,44 @@ impl App {
 
     pub(crate) fn schedule_sym_auto(&mut self) {
         if let Some(m) = self.display().cloned() {
-            self.sym_job = Some(self.worker.submit_symmetry(m, None));
+            let mask = if self.sym_exclude_selection && self.sel_count > 0 {
+                Some(self.sel.clone())
+            } else {
+                None
+            };
+            self.sym_job = Some(self.worker.submit_symmetry(m, SymmetryJobKind::Auto, mask));
             self.status = "Detecting symmetry plane…".to_string();
+        }
+    }
+
+    pub(crate) fn schedule_sym_from_line(&mut self, a: Vec3, b: Vec3) {
+        if let Some(m) = self.display().cloned() {
+            let mask = if self.sym_exclude_selection && self.sel_count > 0 {
+                Some(self.sel.clone())
+            } else {
+                None
+            };
+            self.sym_job = Some(self.worker.submit_symmetry(
+                m,
+                SymmetryJobKind::FromLine { a, b },
+                mask,
+            ));
+            self.status = "Calculating symmetry plane from line…".to_string();
         }
     }
 
     pub(crate) fn schedule_sym_refine(&mut self, init: SymPlane) {
         if let Some(m) = self.display().cloned() {
-            self.sym_job = Some(self.worker.submit_symmetry(m, Some(init)));
+            let mask = if self.sym_exclude_selection && self.sel_count > 0 {
+                Some(self.sel.clone())
+            } else {
+                None
+            };
+            self.sym_job = Some(self.worker.submit_symmetry(
+                m,
+                SymmetryJobKind::Refine(init),
+                mask,
+            ));
             self.status = "Optimizing symmetry plane…".to_string();
         }
     }
@@ -861,10 +893,17 @@ impl App {
                 Mode::Orbit => "LMB drag = free orbit · MMB drag = pan · Wheel = zoom · 1/2/3/4 = views".to_string(),
                 Mode::BrushAdd => "LMB drag over mesh to paint-select front faces".to_string(),
                 Mode::BrushErase => "LMB drag to erase selection".to_string(),
-                Mode::SymPickLine => format!(
-                    "Symmetry line: click point {} of 2 on the mesh · Esc = cancel",
-                    self.sym_pick.len() + 1
-                ),
+                Mode::SymPickLine => {
+                    if self.sym_pick.len() >= 2 {
+                        "Symmetry line ready · Click 'Calculate' in Symmetry panel to compute · Esc = reset"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Symmetry line: click point {} of 2 on the mesh · Esc = cancel",
+                            self.sym_pick.len() + 1
+                        )
+                    }
+                }
             };
             ui.label(hint);
         });
@@ -990,31 +1029,16 @@ impl App {
                     if let Some(hit) =
                         pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
                     {
+                        if self.sym_pick.len() >= 2 {
+                            self.sym_pick.clear();
+                        }
                         self.sym_pick.push(hit.pos);
-                        if self.sym_pick.len() == 2 {
-                            let a = self.sym_pick[0];
-                            let b = self.sym_pick[1];
-                            let l = b - a;
-                            let fwd = -self.camera.back();
-                            let mut n = l.cross(fwd);
-                            if n.length_squared() < 1e-8 {
-                                n = l.cross(Vec3::Y);
-                            }
-                            if n.length_squared() < 1e-8 {
-                                n = l.cross(Vec3::X);
-                            }
-                            let n = n.normalize_or_zero();
-                            let init = SymPlane {
-                                normal: n,
-                                point: (a + b) * 0.5,
-                            };
-                            self.sym = Some(SymState {
-                                plane: init,
-                                rms: f64::INFINITY,
-                                show: true,
-                            });
-                            self.schedule_sym_refine(init);
-                            self.mode = Mode::Orbit;
+                        if self.sym_pick.len() == 1 {
+                            self.status = "Point 1 placed. Click point 2 on the mesh.".to_string();
+                        } else if self.sym_pick.len() == 2 {
+                            self.status =
+                                "Symmetry line drawn. Click 'Calculate' in Symmetry panel to compute."
+                                    .to_string();
                         }
                     }
                 }

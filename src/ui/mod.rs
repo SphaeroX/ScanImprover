@@ -34,10 +34,14 @@ pub fn render_mode_header(app: &mut App, ui: &mut egui::Ui) {
         ),
         Mode::SymPickLine => (
             "PICK LINE",
-            format!(
-                "Click point {} of 2 on the mesh · Esc = cancel",
-                app.sym_pick.len() + 1
-            ),
+            if app.sym_pick.len() >= 2 {
+                "Line ready · Click 'Calculate' in Symmetry panel".to_string()
+            } else {
+                format!(
+                    "Click point {} of 2 on the mesh · Esc = cancel",
+                    app.sym_pick.len() + 1
+                )
+            },
             (40, 220, 255),
         ),
     };
@@ -72,7 +76,6 @@ pub fn render_mode_header(app: &mut App, ui: &mut egui::Ui) {
     });
     if let Some(m) = new_mode {
         if m != app.mode {
-            app.sym_pick.clear();
             app.mode = m;
         }
     }

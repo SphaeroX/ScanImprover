@@ -3,8 +3,16 @@ use crate::geom::bvh::Bvh;
 use crate::geom::distance::{self, Deviation};
 use crate::geom::symmetry::{self, SymPlane};
 use crate::mesh::Mesh;
+use glam::Vec3;
 use std::sync::{mpsc, Arc};
 use std::thread;
+
+#[derive(Clone, Copy, Debug)]
+pub enum SymmetryJobKind {
+    Auto,
+    FromLine { a: Vec3, b: Vec3 },
+    Refine(SymPlane),
+}
 
 pub enum Job {
     Decimate {
@@ -23,7 +31,8 @@ pub enum Job {
     Symmetry {
         id: u64,
         mesh: Arc<Mesh>,
-        init: Option<SymPlane>,
+        kind: SymmetryJobKind,
+        mask: Option<Arc<Vec<u8>>>,
     },
     Deviation {
         id: u64,
@@ -137,9 +146,14 @@ impl Worker {
         id
     }
 
-    pub fn submit_symmetry(&mut self, mesh: Arc<Mesh>, init: Option<SymPlane>) -> u64 {
+    pub fn submit_symmetry(
+        &mut self,
+        mesh: Arc<Mesh>,
+        kind: SymmetryJobKind,
+        mask: Option<Arc<Vec<u8>>>,
+    ) -> u64 {
         let id = self.alloc_id();
-        let _ = self.tx.send(Job::Symmetry { id, mesh, init });
+        let _ = self.tx.send(Job::Symmetry { id, mesh, kind, mask });
         id
     }
 
@@ -253,11 +267,19 @@ fn run(job: Job) -> JobResult {
             },
             Err(message) => JobResult::Failed { id, message },
         },
-        Job::Symmetry { id, mesh, init } => {
+        Job::Symmetry { id, mesh, kind, mask } => {
             let bvh = Bvh::new(&mesh.positions, &mesh.indices);
-            let res = match init {
-                Some(p) => Some(symmetry::refine_symmetry(&mesh, &bvh, &p)),
-                None => symmetry::detect_symmetry(&mesh, &bvh),
+            let mask_slice = mask.as_deref().map(|v| v.as_slice());
+            let res = match kind {
+                SymmetryJobKind::FromLine { a, b } => {
+                    symmetry::detect_symmetry_from_line(&mesh, &bvh, a, b, mask_slice)
+                }
+                SymmetryJobKind::Refine(p) => {
+                    Some(symmetry::refine_symmetry_masked(&mesh, &bvh, &p, mask_slice))
+                }
+                SymmetryJobKind::Auto => {
+                    symmetry::detect_symmetry_masked(&mesh, &bvh, mask_slice)
+                }
             };
             JobResult::Symmetry { id, plane: res }
         }

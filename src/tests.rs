@@ -2,7 +2,9 @@
 mod tests {
     use crate::geom::bvh::{closest_point_triangle, Bvh};
     use crate::geom::fitting::{fit_circle, fit_plane};
-    use crate::geom::symmetry::{detect_symmetry, refine_symmetry, SymPlane};
+    use crate::geom::symmetry::{
+        detect_symmetry, detect_symmetry_from_line, refine_symmetry, SymPlane,
+    };
     use crate::geom::distance::deviation;
     use crate::io;
     use crate::mesh::Mesh;
@@ -231,6 +233,46 @@ mod tests {
         assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
         assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
         assert!(rms < 0.02, "rms {rms}");
+    }
+
+    #[test]
+    fn symmetry_from_line_finds_exact_plane() {
+        let m = symmetric_test_part();
+        let bvh = Bvh::new(&m.positions, &m.indices);
+        let a = Vec3::new(0.0, 1.0, 0.5);
+        let b = Vec3::new(0.0, -1.0, -0.5);
+        let (plane, rms) = detect_symmetry_from_line(&m, &bvh, a, b, None)
+            .expect("symmetry from line failed");
+        assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
+        assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
+        assert!(rms < 0.05, "rms {rms}");
+    }
+
+    #[test]
+    fn symmetry_from_line_with_exclusion_mask() {
+        let base = box_mesh(0.0, 0.0, 0.0, 4.0, 2.0, 2.0);
+        let bump_l = box_mesh(1.5, 1.25, 0.8, 0.5, 0.5, 0.5);
+        let bump_r = box_mesh(-1.5, 1.25, 0.8, 0.5, 0.5, 0.5);
+        let sym_part = merge(&merge(&base, &bump_l), &bump_r);
+        let sym_tri_count = sym_part.triangle_count();
+
+        let asym_protrusion = box_mesh(1.8, -0.8, 0.0, 0.8, 0.8, 0.8);
+        let m = merge(&sym_part, &asym_protrusion);
+        let total_tris = m.triangle_count();
+
+        let mut mask = vec![0u8; total_tris];
+        for t in sym_tri_count..total_tris {
+            mask[t] = 1;
+        }
+
+        let bvh = Bvh::new(&m.positions, &m.indices);
+        let a = Vec3::new(0.0, 1.0, 0.5);
+        let b = Vec3::new(0.0, -1.0, -0.5);
+        let (plane, rms) = detect_symmetry_from_line(&m, &bvh, a, b, Some(&mask))
+            .expect("symmetry with mask failed");
+        assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
+        assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
+        assert!(rms < 0.05, "rms {rms}");
     }
 
     #[test]

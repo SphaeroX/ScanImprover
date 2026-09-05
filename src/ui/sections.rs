@@ -173,7 +173,6 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                 "Pick line"
             };
             if ui.button(pick_label).clicked() {
-                app.sym_pick.clear();
                 app.mode = if app.mode == Mode::SymPickLine {
                     Mode::Orbit
                 } else {
@@ -184,6 +183,32 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                 ui.add(egui::Spinner::new());
             }
         });
+
+        if app.sym_pick.len() >= 2 {
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                if ui.button("Calculate").clicked() {
+                    let a = app.sym_pick[0];
+                    let b = app.sym_pick[1];
+                    app.schedule_sym_from_line(a, b);
+                }
+                if ui.button("Clear line").clicked() {
+                    app.sym_pick.clear();
+                }
+            });
+        } else if !app.sym_pick.is_empty() {
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.label("1 point placed…");
+                if ui.button("Clear line").clicked() {
+                    app.sym_pick.clear();
+                }
+            });
+        }
+
+        ui.add_space(3.0);
+        let sel_text = format!("Exclude selection ({} faces)", app.sel_count);
+        ui.checkbox(&mut app.sym_exclude_selection, sel_text);
     });
 
     let sym_copy = app.sym;
