@@ -33,6 +33,7 @@ pub enum Job {
         mesh: Arc<Mesh>,
         kind: SymmetryJobKind,
         mask: Option<Arc<Vec<u8>>>,
+        exclude_holes: bool,
     },
     Deviation {
         id: u64,
@@ -151,9 +152,16 @@ impl Worker {
         mesh: Arc<Mesh>,
         kind: SymmetryJobKind,
         mask: Option<Arc<Vec<u8>>>,
+        exclude_holes: bool,
     ) -> u64 {
         let id = self.alloc_id();
-        let _ = self.tx.send(Job::Symmetry { id, mesh, kind, mask });
+        let _ = self.tx.send(Job::Symmetry {
+            id,
+            mesh,
+            kind,
+            mask,
+            exclude_holes,
+        });
         id
     }
 
@@ -267,9 +275,33 @@ fn run(job: Job) -> JobResult {
             },
             Err(message) => JobResult::Failed { id, message },
         },
-        Job::Symmetry { id, mesh, kind, mask } => {
+        Job::Symmetry {
+            id,
+            mesh,
+            kind,
+            mask,
+            exclude_holes,
+        } => {
             let bvh = Bvh::new(&mesh.positions, &mesh.indices);
-            let mask_slice = mask.as_deref().map(|v| v.as_slice());
+            let effective_mask: Option<Vec<u8>> = match (mask, exclude_holes) {
+                (Some(user), true) => {
+                    let hole_mask = crate::geom::boundary::generate_hole_mask(&mesh, 2);
+                    let mut combined = (*user).clone();
+                    for (c, h) in combined.iter_mut().zip(hole_mask.iter()) {
+                        if *h > 0 {
+                            *c = 1;
+                        }
+                    }
+                    Some(combined)
+                }
+                (Some(user), false) => Some((*user).clone()),
+                (None, true) => {
+                    let hole_mask = crate::geom::boundary::generate_hole_mask(&mesh, 2);
+                    Some(hole_mask)
+                }
+                (None, false) => None,
+            };
+            let mask_slice = effective_mask.as_deref();
             let res = match kind {
                 SymmetryJobKind::FromLine { a, b } => {
                     symmetry::detect_symmetry_from_line(&mesh, &bvh, a, b, mask_slice)

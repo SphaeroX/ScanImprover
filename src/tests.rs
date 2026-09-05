@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::geom::boundary::{find_boundary_edges, generate_hole_mask};
     use crate::geom::bvh::{closest_point_triangle, Bvh};
     use crate::geom::fitting::{fit_circle, fit_plane};
     use crate::geom::symmetry::{
@@ -270,6 +271,52 @@ mod tests {
         let b = Vec3::new(0.0, -1.0, -0.5);
         let (plane, rms) = detect_symmetry_from_line(&m, &bvh, a, b, Some(&mask))
             .expect("symmetry with mask failed");
+        assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
+        assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
+        assert!(rms < 0.05, "rms {rms}");
+    }
+
+    #[test]
+    fn boundary_hole_detection_watertight_and_open() {
+        let m = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let b_edges = find_boundary_edges(&m);
+        assert_eq!(b_edges.len(), 0, "watertight box should have 0 boundary edges");
+        let mask = generate_hole_mask(&m, 2);
+        assert!(mask.iter().all(|&v| v == 0), "watertight mask should be empty");
+
+        // Open mesh: remove 2 triangles (indices 0..6) from box
+        let mut open_indices = m.indices.clone();
+        open_indices.drain(0..6);
+        let open_m = Mesh::from_indexed(m.positions.clone(), open_indices);
+        let open_edges = find_boundary_edges(&open_m);
+        assert!(!open_edges.is_empty(), "open mesh must have boundary edges");
+        let open_mask = generate_hole_mask(&open_m, 2);
+        assert!(open_mask.iter().any(|&v| v > 0), "open mesh mask should have masked triangles");
+    }
+
+    #[test]
+    fn symmetry_with_automatic_hole_exclusion() {
+        let sym_part = symmetric_test_part();
+        let mut hole_indices = Vec::new();
+        for t in 0..sym_part.triangle_count() {
+            let [p0, p1, p2] = sym_part.triangle(t);
+            let center_x = (p0.x + p1.x + p2.x) / 3.0;
+            // Remove a patch on the +X bump
+            if center_x > 1.4 && center_x < 1.7 && p0.y > 1.2 {
+                continue;
+            }
+            hole_indices.push(sym_part.indices[3 * t]);
+            hole_indices.push(sym_part.indices[3 * t + 1]);
+            hole_indices.push(sym_part.indices[3 * t + 2]);
+        }
+        let mesh_with_hole = Mesh::from_indexed(sym_part.positions.clone(), hole_indices);
+        let bvh = Bvh::new(&mesh_with_hole.positions, &mesh_with_hole.indices);
+        let hole_mask = generate_hole_mask(&mesh_with_hole, 2);
+
+        let a = Vec3::new(0.0, 1.0, 0.5);
+        let b = Vec3::new(0.0, -1.0, -0.5);
+        let (plane, rms) = detect_symmetry_from_line(&mesh_with_hole, &bvh, a, b, Some(&hole_mask))
+            .expect("symmetry with hole mask failed");
         assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
         assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
         assert!(rms < 0.05, "rms {rms}");

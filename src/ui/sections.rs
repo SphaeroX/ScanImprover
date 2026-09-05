@@ -176,6 +176,7 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                 app.mode = if app.mode == Mode::SymPickLine {
                     Mode::Orbit
                 } else {
+                    app.sym_pick.clear();
                     Mode::SymPickLine
                 };
             }
@@ -209,6 +210,7 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(3.0);
         let sel_text = format!("Exclude selection ({} faces)", app.sel_count);
         ui.checkbox(&mut app.sym_exclude_selection, sel_text);
+        ui.checkbox(&mut app.sym_exclude_holes, "Exclude mesh holes");
     });
 
     let sym_copy = app.sym;

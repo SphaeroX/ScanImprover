@@ -78,6 +78,7 @@ pub struct App {
     pub(crate) sym: Option<SymState>,
     pub(crate) sym_pick: Vec<Vec3>,
     pub(crate) sym_exclude_selection: bool,
+    pub(crate) sym_exclude_holes: bool,
     pub(crate) plane: Option<PlaneFit>,
     pub(crate) show_plane: bool,
     pub(crate) circle: Option<CircleFit>,
@@ -132,6 +133,7 @@ impl App {
             sym: None,
             sym_pick: Vec::new(),
             sym_exclude_selection: true,
+            sym_exclude_holes: true,
             plane: None,
             show_plane: true,
             circle: None,
@@ -463,7 +465,12 @@ impl App {
             } else {
                 None
             };
-            self.sym_job = Some(self.worker.submit_symmetry(m, SymmetryJobKind::Auto, mask));
+            self.sym_job = Some(self.worker.submit_symmetry(
+                m,
+                SymmetryJobKind::Auto,
+                mask,
+                self.sym_exclude_holes,
+            ));
             self.status = "Detecting symmetry plane…".to_string();
         }
     }
@@ -479,6 +486,7 @@ impl App {
                 m,
                 SymmetryJobKind::FromLine { a, b },
                 mask,
+                self.sym_exclude_holes,
             ));
             self.status = "Calculating symmetry plane from line…".to_string();
         }
@@ -495,6 +503,7 @@ impl App {
                 m,
                 SymmetryJobKind::Refine(init),
                 mask,
+                self.sym_exclude_holes,
             ));
             self.status = "Optimizing symmetry plane…".to_string();
         }
@@ -1039,6 +1048,7 @@ impl App {
                             self.status =
                                 "Symmetry line drawn. Click 'Calculate' in Symmetry panel to compute."
                                     .to_string();
+                            self.mode = Mode::Orbit;
                         }
                     }
                 }

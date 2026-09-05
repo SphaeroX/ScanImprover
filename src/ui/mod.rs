@@ -76,6 +76,9 @@ pub fn render_mode_header(app: &mut App, ui: &mut egui::Ui) {
     });
     if let Some(m) = new_mode {
         if m != app.mode {
+            if m == Mode::SymPickLine {
+                app.sym_pick.clear();
+            }
             app.mode = m;
         }
     }
