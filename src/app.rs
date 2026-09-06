@@ -1,7 +1,9 @@
 use crate::camera::{Camera, ViewDir};
 use crate::geom::bvh::Bvh;
 use crate::geom::distance::Deviation;
-use crate::geom::fitting::{fit_circle, fit_plane, plane_basis, CircleFit, PlaneFit};
+use crate::geom::fitting::{
+    fit_circle, fit_plane, plane_basis, CircleFit, FittedCircle, FittedPlane, PlaneFit,
+};
 use crate::geom::symmetry::SymPlane;
 use crate::io;
 use crate::mesh::{Aabb, Mesh};
@@ -12,6 +14,21 @@ use eframe::egui;
 use glam::{Quat, Vec3};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+pub(crate) const PLANE_COLORS: [[f32; 4]; 5] = [
+    [1.0, 0.65, 0.1, 0.9],   // Warm Orange / Gold
+    [0.15, 0.85, 0.95, 0.9], // Cyan
+    [0.35, 0.9, 0.45, 0.9],  // Emerald Green
+    [0.85, 0.35, 0.95, 0.9], // Purple
+    [1.0, 0.3, 0.4, 0.9],    // Coral Red
+];
+
+pub(crate) const CIRCLE_COLORS: [[f32; 4]; 4] = [
+    [1.0, 0.25, 0.8, 1.0], // Magenta / Pink
+    [0.2, 0.8, 1.0, 1.0],  // Sky Blue
+    [1.0, 0.85, 0.2, 1.0], // Amber
+    [0.4, 1.0, 0.5, 1.0],  // Mint
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -34,6 +51,10 @@ pub(crate) struct Snapshot {
     pub(crate) sym: Option<SymState>,
     pub(crate) plane: Option<PlaneFit>,
     pub(crate) circle: Option<CircleFit>,
+    pub(crate) planes: Vec<FittedPlane>,
+    pub(crate) circles: Vec<FittedCircle>,
+    pub(crate) selected_plane_id: Option<u64>,
+    pub(crate) selected_circle_id: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,8 +100,15 @@ pub struct App {
     pub(crate) sym_exclude_holes: bool,
     pub(crate) plane: Option<PlaneFit>,
     pub(crate) show_plane: bool,
+    pub(crate) planes: Vec<FittedPlane>,
+    pub(crate) selected_plane_id: Option<u64>,
     pub(crate) circle: Option<CircleFit>,
     pub(crate) show_circle: bool,
+    pub(crate) circles: Vec<FittedCircle>,
+    pub(crate) selected_circle_id: Option<u64>,
+    pub(crate) next_obj_id: u64,
+    pub(crate) show_mesh: bool,
+    pub(crate) show_object_browser: bool,
     pub(crate) show_wireframe: bool,
     pub(crate) show_bbox: bool,
     pub(crate) show_triad: bool,
@@ -141,8 +169,15 @@ impl App {
             sym_exclude_holes: true,
             plane: None,
             show_plane: true,
+            planes: Vec::new(),
+            selected_plane_id: None,
             circle: None,
             show_circle: true,
+            circles: Vec::new(),
+            selected_circle_id: None,
+            next_obj_id: 1,
+            show_mesh: true,
+            show_object_browser: true,
             show_wireframe: false,
             show_bbox: true,
             show_triad: true,
@@ -188,6 +223,10 @@ impl App {
                 sym: self.sym,
                 plane: self.plane,
                 circle: self.circle,
+                planes: self.planes.clone(),
+                circles: self.circles.clone(),
+                selected_plane_id: self.selected_plane_id,
+                selected_circle_id: self.selected_circle_id,
             });
             if self.undo.len() > 25 {
                 self.undo.remove(0);
@@ -204,6 +243,10 @@ impl App {
             self.sym = s.sym;
             self.plane = s.plane;
             self.circle = s.circle;
+            self.planes = s.planes;
+            self.circles = s.circles;
+            self.selected_plane_id = s.selected_plane_id;
+            self.selected_circle_id = s.selected_circle_id;
             self.deviation = None;
             self.heat = None;
             self.bvh = None;
@@ -253,6 +296,11 @@ impl App {
                     self.sym_pick.clear();
                     self.plane = None;
                     self.circle = None;
+                    self.planes.clear();
+                    self.circles.clear();
+                    self.selected_plane_id = None;
+                    self.selected_circle_id = None;
+                    self.next_obj_id = 1;
                     self.undo.clear();
                     self.mesh_dirty = true;
                     self.aux_dirty = true;
@@ -295,6 +343,14 @@ impl App {
         if let Some(s) = &mut self.sym {
             s.plane.point = rot * s.plane.point + trans;
             s.plane.normal = (rot * s.plane.normal).normalize();
+        }
+        for p in &mut self.planes {
+            p.fit.point = rot * p.fit.point + trans;
+            p.fit.normal = (rot * p.fit.normal).normalize();
+        }
+        for c in &mut self.circles {
+            c.fit.center = rot * c.fit.center + trans;
+            c.fit.normal = (rot * c.fit.normal).normalize();
         }
         if let Some(p) = &mut self.plane {
             p.point = rot * p.point + trans;
@@ -602,6 +658,20 @@ impl App {
         let points = self.selection_points();
         match points.map(|p| fit_plane(&p)) {
             Some(Some(f)) => {
+                self.push_snapshot();
+                let id = self.next_obj_id;
+                self.next_obj_id += 1;
+                let col_idx = self.planes.len() % PLANE_COLORS.len();
+                let color = PLANE_COLORS[col_idx];
+                let name = format!("Plane {}", self.planes.len() + 1);
+                self.planes.push(FittedPlane {
+                    id,
+                    name,
+                    fit: f,
+                    visible: true,
+                    color,
+                });
+                self.selected_plane_id = Some(id);
                 self.plane = Some(f);
                 self.show_plane = true;
                 self.status = format!(
@@ -619,6 +689,20 @@ impl App {
         let points = self.selection_points();
         match points.map(|p| fit_circle(&p)) {
             Some(Some(c)) => {
+                self.push_snapshot();
+                let id = self.next_obj_id;
+                self.next_obj_id += 1;
+                let col_idx = self.circles.len() % CIRCLE_COLORS.len();
+                let color = CIRCLE_COLORS[col_idx];
+                let name = format!("Circle {}", self.circles.len() + 1);
+                self.circles.push(FittedCircle {
+                    id,
+                    name,
+                    fit: c,
+                    visible: true,
+                    color,
+                });
+                self.selected_circle_id = Some(id);
                 self.circle = Some(c);
                 self.show_circle = true;
                 self.status = format!(
@@ -629,6 +713,77 @@ impl App {
             }
             Some(None) => self.status = "Circle fit failed on selection.".to_string(),
             None => self.status = "Select faces first.".to_string(),
+        }
+    }
+
+    pub(crate) fn select_plane(&mut self, id: u64) {
+        self.selected_plane_id = Some(id);
+        if let Some(p) = self.planes.iter().find(|p| p.id == id) {
+            self.plane = Some(p.fit);
+            self.show_plane = p.visible;
+        }
+    }
+
+    pub(crate) fn delete_plane(&mut self, id: u64) {
+        self.push_snapshot();
+        self.planes.retain(|p| p.id != id);
+        if self.selected_plane_id == Some(id) {
+            self.selected_plane_id = self.planes.last().map(|p| p.id);
+            self.plane = self.planes.last().map(|p| p.fit);
+        }
+        self.status = "Plane deleted.".to_string();
+    }
+
+    pub(crate) fn rotate_plane_normal_to_axis(&mut self, plane_id: u64, axis: Vec3) {
+        if let Some(p) = self.planes.iter().find(|p| p.id == plane_id) {
+            let normal = p.fit.normal;
+            let q = rotation_between(normal, axis);
+            self.apply_transform(q, Vec3::ZERO);
+            self.status = format!("Aligned normal to {}.", axis_name(axis));
+        }
+    }
+
+    pub(crate) fn origin_on_plane_id(&mut self, plane_id: u64) {
+        if let Some(p) = self.planes.iter().find(|p| p.id == plane_id) {
+            let normal = p.fit.normal;
+            let d = p.fit.point.dot(normal);
+            self.apply_transform(Quat::IDENTITY, -normal * d);
+            self.status = "Origin moved onto the fitted plane.".to_string();
+        }
+    }
+
+    pub(crate) fn select_circle(&mut self, id: u64) {
+        self.selected_circle_id = Some(id);
+        if let Some(c) = self.circles.iter().find(|c| c.id == id) {
+            self.circle = Some(c.fit);
+            self.show_circle = c.visible;
+        }
+    }
+
+    pub(crate) fn delete_circle(&mut self, id: u64) {
+        self.push_snapshot();
+        self.circles.retain(|c| c.id != id);
+        if self.selected_circle_id == Some(id) {
+            self.selected_circle_id = self.circles.last().map(|c| c.id);
+            self.circle = self.circles.last().map(|c| c.fit);
+        }
+        self.status = "Circle deleted.".to_string();
+    }
+
+    pub(crate) fn rotate_circle_axis_to(&mut self, circle_id: u64, axis: Vec3) {
+        if let Some(c) = self.circles.iter().find(|c| c.id == circle_id) {
+            let normal = c.fit.normal;
+            let q = rotation_between(normal, axis);
+            self.apply_transform(q, Vec3::ZERO);
+            self.status = format!("Aligned circle axis to {}.", axis_name(axis));
+        }
+    }
+
+    pub(crate) fn origin_at_circle_id(&mut self, circle_id: u64) {
+        if let Some(c) = self.circles.iter().find(|c| c.id == circle_id) {
+            let center = c.fit.center;
+            self.apply_transform(Quat::IDENTITY, -center);
+            self.status = "Origin moved to the circle center.".to_string();
         }
     }
 
@@ -936,6 +1091,7 @@ impl App {
             ui.checkbox(&mut self.show_wireframe, "Wireframe");
             ui.checkbox(&mut self.show_bbox, "BBox");
             ui.checkbox(&mut self.show_triad, "Origin");
+            ui.checkbox(&mut self.show_object_browser, "Objects");
             ui.separator();
             ui.label("View:");
             if ui.small_button("X").clicked() {
@@ -1293,16 +1449,51 @@ impl App {
                     ));
                 }
             }
-            if let Some(p) = &self.plane {
-                if self.show_plane {
+            for p in &self.planes {
+                if p.visible {
                     let half = diag * 0.35;
-                    depth_lines.extend(plane_grid_lines(p.point, p.normal, half, 6, [1.0, 0.6, 0.1, 0.9]));
-                    fills.extend(plane_fill(p.point, p.normal, half, [1.0, 0.6, 0.1, 0.12]));
+                    let is_sel = self.selected_plane_id == Some(p.id);
+                    let mut col = p.color;
+                    let mut fill_col = [col[0], col[1], col[2], 0.12];
+                    if is_sel {
+                        col = [col[0], col[1], col[2], 1.0];
+                        fill_col = [col[0], col[1], col[2], 0.22];
+                        overlay_lines.extend(plane_grid_lines(
+                            p.fit.point,
+                            p.fit.normal,
+                            half,
+                            2,
+                            [1.0, 1.0, 1.0, 0.7],
+                        ));
+                    }
+                    depth_lines.extend(plane_grid_lines(p.fit.point, p.fit.normal, half, 6, col));
+                    fills.extend(plane_fill(p.fit.point, p.fit.normal, half, fill_col));
                 }
             }
-            if let Some(c) = &self.circle {
-                if self.show_circle {
-                    depth_lines.extend(circle_lines(c.center, c.normal, c.radius, [1.0, 0.2, 0.8, 1.0]));
+            if self.planes.is_empty() {
+                if let Some(p) = &self.plane {
+                    if self.show_plane {
+                        let half = diag * 0.35;
+                        depth_lines.extend(plane_grid_lines(p.point, p.normal, half, 6, [1.0, 0.6, 0.1, 0.9]));
+                        fills.extend(plane_fill(p.point, p.normal, half, [1.0, 0.6, 0.1, 0.12]));
+                    }
+                }
+            }
+            for c in &self.circles {
+                if c.visible {
+                    let is_sel = self.selected_circle_id == Some(c.id);
+                    let mut col = c.color;
+                    if is_sel {
+                        col = [1.0, 1.0, 0.3, 1.0];
+                    }
+                    depth_lines.extend(circle_lines(c.fit.center, c.fit.normal, c.fit.radius, col));
+                }
+            }
+            if self.circles.is_empty() {
+                if let Some(c) = &self.circle {
+                    if self.show_circle {
+                        depth_lines.extend(circle_lines(c.center, c.normal, c.radius, [1.0, 0.2, 0.8, 1.0]));
+                    }
                 }
             }
             if self.mode == Mode::SymPickLine {
@@ -1446,7 +1637,7 @@ impl App {
                     } else {
                         0.0
                     },
-                    true,
+                    self.show_mesh,
                     self.show_wireframe,
                 );
                 gpu.write_lines_depth(&depth_lines);
@@ -1456,6 +1647,10 @@ impl App {
             ui.painter()
                 .add(crate::render::make_callback(gpu_arc, rect));
         }
+
+        // Viewport Overlays: Selection HUD and Object Browser
+        crate::ui::selection_hud::render_selection_hud(self, ui, rect);
+        crate::ui::object_browser::render_object_browser(self, ui, rect);
     }
 }
 

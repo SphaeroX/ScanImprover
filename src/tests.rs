@@ -447,4 +447,43 @@ mod tests {
         };
         assert!(err.contains("Unsupported"));
     }
+
+    #[test]
+    fn multi_plane_and_circle_management() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        let tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+        app.sel = std::sync::Arc::new(vec![1u8; tris]);
+        app.sel_count = tris;
+
+        // Fit first plane
+        app.fit_plane_from_selection();
+        assert_eq!(app.planes.len(), 1);
+        assert_eq!(app.planes[0].name, "Plane 1");
+        assert!(app.selected_plane_id.is_some());
+
+        // Fit second plane
+        app.fit_plane_from_selection();
+        assert_eq!(app.planes.len(), 2);
+        assert_eq!(app.planes[1].name, "Plane 2");
+        let id2 = app.planes[1].id;
+        assert_eq!(app.selected_plane_id, Some(id2));
+
+        // Delete plane 1
+        let id1 = app.planes[0].id;
+        app.delete_plane(id1);
+        assert_eq!(app.planes.len(), 1);
+        assert_eq!(app.planes[0].id, id2);
+
+        // Undo delete
+        app.undo();
+        assert_eq!(app.planes.len(), 2);
+
+        // Test clear selection
+        assert!(app.sel_count > 0);
+        app.clear_selection();
+        assert_eq!(app.sel_count, 0);
+    }
 }

@@ -1,5 +1,7 @@
 pub mod accordion;
+pub mod object_browser;
 pub mod sections;
+pub mod selection_hud;
 
 use crate::app::App;
 use accordion::{accordion_body, accordion_header};

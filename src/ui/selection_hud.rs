@@ -1,0 +1,83 @@
+﻿use crate::app::App;
+use eframe::egui;
+
+/// Renders a floating HUD pill at the top-center of the 3D viewport when faces are selected.
+/// Displays the number of selected faces and provides an "Unselect" button to clear the selection.
+pub fn render_selection_hud(app: &mut App, ui: &mut egui::Ui, viewport_rect: egui::Rect) {
+    if app.sel_count == 0 {
+        return;
+    }
+
+    let hud_pos = egui::pos2(viewport_rect.center().x, viewport_rect.top() + 12.0);
+
+    egui::Area::new(egui::Id::new("viewport_selection_hud"))
+        .fixed_pos(hud_pos)
+        .pivot(egui::Align2::CENTER_TOP)
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(18, 22, 30, 235))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 150, 40, 110),
+                ))
+                .corner_radius(16.0)
+                .inner_margin(egui::Margin::symmetric(14, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Orange indicator dot
+                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::empty());
+                        ui.painter().circle_filled(
+                            dot_rect.center(),
+                            4.0,
+                            egui::Color32::from_rgb(255, 155, 45),
+                        );
+
+                        ui.add_space(2.0);
+
+                        // Selected faces counter
+                        let count_str = format_number(app.sel_count);
+                        ui.label(
+                            egui::RichText::new(format!("{count_str} faces selected"))
+                                .strong()
+                                .size(12.5)
+                                .color(egui::Color32::from_rgb(230, 235, 245)),
+                        );
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Unselect button
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Unselect")
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(255, 200, 150)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(255, 120, 30, 35))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_unmultiplied(255, 140, 40, 80),
+                        ))
+                        .corner_radius(10.0);
+
+                        if ui.add(btn).clicked() {
+                            app.clear_selection();
+                        }
+                    });
+                });
+        });
+}
+
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().rev().collect();
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*ch);
+    }
+    result.chars().rev().collect()
+}

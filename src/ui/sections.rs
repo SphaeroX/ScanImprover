@@ -332,8 +332,23 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
     if plane_copy.is_some() {
         let p = plane_copy.unwrap();
         ui.add_space(4.0);
-        group_box(ui, Some("FITTED PLANE"), |ui| {
-            ui.checkbox(&mut app.show_plane, "Show plane");
+        let plane_title = if let Some(id) = app.selected_plane_id {
+            if let Some(fp) = app.planes.iter().find(|p| p.id == id) {
+                format!("FITTED PLANE ({})", fp.name)
+            } else {
+                "FITTED PLANE".to_string()
+            }
+        } else {
+            "FITTED PLANE".to_string()
+        };
+        group_box(ui, Some(&plane_title), |ui| {
+            if ui.checkbox(&mut app.show_plane, "Show plane").changed() {
+                if let Some(id) = app.selected_plane_id {
+                    if let Some(fp) = app.planes.iter_mut().find(|p| p.id == id) {
+                        fp.visible = app.show_plane;
+                    }
+                }
+            }
             ui.label(format!(
                 "Plane  N ({:.3}, {:.3}, {:.3})  off {:.3} mm",
                 p.normal.x,
@@ -376,8 +391,23 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
     if circle_copy.is_some() {
         let c = circle_copy.unwrap();
         ui.add_space(4.0);
-        group_box(ui, Some("FITTED CIRCLE"), |ui| {
-            ui.checkbox(&mut app.show_circle, "Show circle");
+        let circle_title = if let Some(id) = app.selected_circle_id {
+            if let Some(fc) = app.circles.iter().find(|c| c.id == id) {
+                format!("FITTED CIRCLE ({})", fc.name)
+            } else {
+                "FITTED CIRCLE".to_string()
+            }
+        } else {
+            "FITTED CIRCLE".to_string()
+        };
+        group_box(ui, Some(&circle_title), |ui| {
+            if ui.checkbox(&mut app.show_circle, "Show circle").changed() {
+                if let Some(id) = app.selected_circle_id {
+                    if let Some(fc) = app.circles.iter_mut().find(|c| c.id == id) {
+                        fc.visible = app.show_circle;
+                    }
+                }
+            }
             ui.label(format!(
                 "Circle R = {:.4} mm, center ({:.2}, {:.2}, {:.2})",
                 c.radius, c.center.x, c.center.y, c.center.z

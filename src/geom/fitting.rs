@@ -18,6 +18,24 @@ pub struct CircleFit {
     pub radial_max: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct FittedPlane {
+    pub id: u64,
+    pub name: String,
+    pub fit: PlaneFit,
+    pub visible: bool,
+    pub color: [f32; 4],
+}
+
+#[derive(Clone, Debug)]
+pub struct FittedCircle {
+    pub id: u64,
+    pub name: String,
+    pub fit: CircleFit,
+    pub visible: bool,
+    pub color: [f32; 4],
+}
+
 pub fn eigen_3x3(m: [[f64; 3]; 3]) -> [(f64, [f64; 3]); 3] {
     let mut a = m;
     let mut v: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
