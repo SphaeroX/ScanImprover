@@ -113,6 +113,7 @@ pub struct App {
     pub(crate) show_bbox: bool,
     pub(crate) show_triad: bool,
     pub(crate) undo: Vec<Snapshot>,
+    pub(crate) redo: Vec<Snapshot>,
     pub(crate) status: String,
     pub(crate) file_path: Option<PathBuf>,
     pub(crate) mesh_dirty: bool,
@@ -130,7 +131,7 @@ pub struct App {
     pub(crate) align_slots: crate::geom::alignment::AlignmentSlots,
     pub(crate) repair_holes: Vec<crate::geom::hole_detect::HoleLoop>,
     pub(crate) repair_selected_hole: Option<usize>,
-    pub(crate) repair_method: crate::geom::hole_fill::HoleFillMethod,
+    pub(crate) repair_config: crate::geom::hole_fill::HoleFillConfig,
     pub(crate) repair_preview_active: bool,
     pub(crate) repair_preview_patch: Option<crate::geom::hole_fill::MeshPatch>,
     pub(crate) repair_health: Option<crate::geom::repair::MeshHealthReport>,
@@ -190,6 +191,7 @@ impl App {
             show_bbox: true,
             show_triad: true,
             undo: Vec::new(),
+            redo: Vec::new(),
             status: "Open a mesh file to begin (STL, PLY or OBJ). Units are assumed to be mm."
                 .to_string(),
             file_path: None,
@@ -208,7 +210,7 @@ impl App {
             align_slots: crate::geom::alignment::AlignmentSlots::default(),
             repair_holes: Vec::new(),
             repair_selected_hole: None,
-            repair_method: crate::geom::hole_fill::HoleFillMethod::PlanarFan,
+            repair_config: crate::geom::hole_fill::HoleFillConfig::default(),
             repair_preview_active: true,
             repair_preview_patch: None,
             repair_health: None,
@@ -247,11 +249,29 @@ impl App {
             if self.undo.len() > 25 {
                 self.undo.remove(0);
             }
+            self.redo.clear();
         }
     }
 
     pub(crate) fn undo(&mut self) {
         if let Some(s) = self.undo.pop() {
+            if let (Some(current), Some(original)) = (&self.current, &self.original) {
+                self.redo.push(Snapshot {
+                    current: current.clone(),
+                    original: original.clone(),
+                    sel: self.sel.clone(),
+                    sym: self.sym,
+                    plane: self.plane,
+                    circle: self.circle,
+                    planes: self.planes.clone(),
+                    circles: self.circles.clone(),
+                    selected_plane_id: self.selected_plane_id,
+                    selected_circle_id: self.selected_circle_id,
+                });
+                if self.redo.len() > 25 {
+                    self.redo.remove(0);
+                }
+            }
             self.current = Some(s.current);
             self.original = Some(s.original);
             self.sel = s.sel;
@@ -277,7 +297,55 @@ impl App {
             self.aux_dirty = true;
             self.recount_sel();
             self.sync_bbox();
-            self.status = "Undo applied.".to_string();
+            self.status = format!("Undone. ({} remaining)", self.undo.len());
+        }
+    }
+
+    pub(crate) fn redo(&mut self) {
+        if let Some(s) = self.redo.pop() {
+            if let (Some(current), Some(original)) = (&self.current, &self.original) {
+                self.undo.push(Snapshot {
+                    current: current.clone(),
+                    original: original.clone(),
+                    sel: self.sel.clone(),
+                    sym: self.sym,
+                    plane: self.plane,
+                    circle: self.circle,
+                    planes: self.planes.clone(),
+                    circles: self.circles.clone(),
+                    selected_plane_id: self.selected_plane_id,
+                    selected_circle_id: self.selected_circle_id,
+                });
+                if self.undo.len() > 25 {
+                    self.undo.remove(0);
+                }
+            }
+            self.current = Some(s.current);
+            self.original = Some(s.original);
+            self.sel = s.sel;
+            self.preview = None;
+            self.sym = s.sym;
+            self.plane = s.plane;
+            self.circle = s.circle;
+            self.planes = s.planes;
+            self.circles = s.circles;
+            self.selected_plane_id = s.selected_plane_id;
+            self.selected_circle_id = s.selected_circle_id;
+            self.deviation = None;
+            self.heat = None;
+            self.bvh = None;
+            self.topology = None;
+            self.hover_hit = None;
+            self.hover_tris.clear();
+            self.repair_holes.clear();
+            self.repair_selected_hole = None;
+            self.repair_preview_patch = None;
+            self.repair_health = None;
+            self.mesh_dirty = true;
+            self.aux_dirty = true;
+            self.recount_sel();
+            self.sync_bbox();
+            self.status = format!("Redone. ({} remaining)", self.redo.len());
         }
     }
 
@@ -326,6 +394,7 @@ impl App {
                     self.repair_preview_patch = None;
                     self.repair_health = None;
                     self.undo.clear();
+                    self.redo.clear();
                     self.mesh_dirty = true;
                     self.aux_dirty = true;
                     self.wire_dirty = true;
@@ -341,7 +410,7 @@ impl App {
         }
     }
 
-    fn apply_transform(&mut self, rot: Quat, trans: Vec3) {
+    pub(crate) fn apply_transform(&mut self, rot: Quat, trans: Vec3) {
         self.push_snapshot();
         let mut new_current = None;
         let mut new_original = None;
@@ -1187,8 +1256,8 @@ impl App {
         }
     }
 
-    pub(crate) fn set_hole_fill_method(&mut self, method: crate::geom::hole_fill::HoleFillMethod) {
-        self.repair_method = method;
+    pub(crate) fn set_hole_fill_config(&mut self, config: crate::geom::hole_fill::HoleFillConfig) {
+        self.repair_config = config;
         self.update_hole_preview();
     }
 
@@ -1221,7 +1290,7 @@ impl App {
             .and_then(|idx| self.repair_holes.get(idx).cloned());
 
         if let (Some(m), Some(hole)) = (m_opt, hole_opt) {
-            match crate::geom::hole_fill::generate_hole_patch(&m, &hole, self.repair_method) {
+            match crate::geom::hole_fill::generate_hole_patch(&m, &hole, self.repair_config) {
                 Ok(patch) => self.repair_preview_patch = Some(patch),
                 Err(e) => {
                     self.status = format!("Preview error: {e}");
@@ -1237,12 +1306,12 @@ impl App {
         if let Some(idx) = self.repair_selected_hole {
             if let Some(hole) = self.repair_holes.get(idx).cloned() {
                 if let Some(curr) = self.current.clone() {
-                    match crate::geom::hole_fill::generate_hole_patch(&curr, &hole, self.repair_method) {
+                    match crate::geom::hole_fill::generate_hole_patch(&curr, &hole, self.repair_config) {
                         Ok(patch) => {
                             self.push_snapshot();
                             let mut next_mesh = (*curr).clone();
                             crate::geom::hole_fill::apply_patch(&mut next_mesh, &patch);
-                            let method_name = self.repair_method.display_name();
+                            let method_name = self.repair_config.method.display_name();
                             self.set_mesh_modified(next_mesh, format!("Hole #{} filled using {}.", hole.id, method_name));
                         }
                         Err(e) => self.status = format!("Failed to fill hole: {e}"),
@@ -1258,11 +1327,11 @@ impl App {
             return;
         }
         if let Some(curr) = self.current.clone() {
-            match crate::geom::hole_fill::fill_holes(&curr, &self.repair_holes, self.repair_method) {
+            match crate::geom::hole_fill::fill_holes(&curr, &self.repair_holes, self.repair_config) {
                 Ok(next_mesh) => {
                     self.push_snapshot();
                     let count = self.repair_holes.len();
-                    let method_name = self.repair_method.display_name();
+                    let method_name = self.repair_config.method.display_name();
                     self.set_mesh_modified(next_mesh, format!("Filled all {count} holes using {}.", method_name));
                 }
                 Err(e) => self.status = format!("Failed to fill all holes: {e}"),
@@ -1432,6 +1501,33 @@ impl App {
                 }
             }
             ui.separator();
+            let can_undo = !self.undo.is_empty();
+            let can_redo = !self.redo.is_empty();
+            let undo_label = if can_undo {
+                format!("⮌ Undo ({})", self.undo.len())
+            } else {
+                "⮌ Undo".to_string()
+            };
+            let redo_label = if can_redo {
+                format!("⮎ Redo ({})", self.redo.len())
+            } else {
+                "⮎ Redo".to_string()
+            };
+            if ui
+                .add_enabled(can_undo, egui::Button::new(undo_label))
+                .on_hover_text("Undo last action (Ctrl+Z)")
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new(redo_label))
+                .on_hover_text("Redo last undone action (Ctrl+Y or Ctrl+Shift+Z)")
+                .clicked()
+            {
+                self.redo();
+            }
+            ui.separator();
             let export = |ui: &mut egui::Ui, app: &mut App, ext: &str| {
                 if ui.button(format!("Export {ext}")).clicked() {
                     if app.display().is_some() {
@@ -1529,9 +1625,16 @@ impl App {
 
         let ctrl_z = ui
             .ctx()
-            .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z));
+            .input(|i| i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z));
         if ctrl_z {
             self.undo();
+        }
+        let ctrl_redo = ui.ctx().input(|i| {
+            (i.modifiers.ctrl && i.key_pressed(egui::Key::Y))
+                || (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+        });
+        if ctrl_redo {
+            self.redo();
         }
         let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
         if esc {

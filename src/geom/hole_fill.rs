@@ -35,6 +35,74 @@ impl HoleFillMethod {
     }
 }
 
+/// Direction mode for bulging / curving the hole fill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FillDirectionMode {
+    AutoNormal,
+    InvertedNormal,
+    AxisX,
+    AxisY,
+    AxisZ,
+}
+
+impl FillDirectionMode {
+    pub fn all() -> [FillDirectionMode; 5] {
+        [
+            FillDirectionMode::AutoNormal,
+            FillDirectionMode::InvertedNormal,
+            FillDirectionMode::AxisX,
+            FillDirectionMode::AxisY,
+            FillDirectionMode::AxisZ,
+        ]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            FillDirectionMode::AutoNormal => "Auto (Surface Normal)",
+            FillDirectionMode::InvertedNormal => "Inverted Normal",
+            FillDirectionMode::AxisX => "Axis X",
+            FillDirectionMode::AxisY => "Axis Y",
+            FillDirectionMode::AxisZ => "Axis Z",
+        }
+    }
+
+    pub fn compute_vector(&self, hole_normal: Vec3) -> Vec3 {
+        match self {
+            FillDirectionMode::AutoNormal => hole_normal.normalize_or_zero(),
+            FillDirectionMode::InvertedNormal => -hole_normal.normalize_or_zero(),
+            FillDirectionMode::AxisX => Vec3::X,
+            FillDirectionMode::AxisY => Vec3::Y,
+            FillDirectionMode::AxisZ => Vec3::Z,
+        }
+    }
+}
+
+/// Comprehensive Meshmixer-style configuration for hole filling.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct HoleFillConfig {
+    pub method: HoleFillMethod,
+    /// Density / resolution scale: 0.2 (coarse) to 3.0 (ultra fine). Default: 1.0
+    pub density: f32,
+    /// Bulge / roundness factor: -1.0 (concave) .. 0.0 (flat) .. 1.0 (convex dome). Default: 0.0
+    pub bulge: f32,
+    /// Direction mode for the bulge / curvature
+    pub direction_mode: FillDirectionMode,
+    /// Fairing / smoothing iterations: 5 to 50. Default: 25
+    pub smooth_iterations: usize,
+}
+
+impl Default for HoleFillConfig {
+    fn default() -> Self {
+        Self {
+            method: HoleFillMethod::LiepaSmooth,
+            density: 1.0,
+            bulge: 0.0,
+            direction_mode: FillDirectionMode::AutoNormal,
+            smooth_iterations: 25,
+        }
+    }
+}
+
 /// Represents a triangulated patch filling a hole.
 #[derive(Clone, Debug, Default)]
 pub struct MeshPatch {
@@ -48,11 +116,11 @@ pub struct MeshPatch {
     pub preview_indices: Vec<u32>,
 }
 
-/// Triangulates a hole loop with the specified method.
+/// Triangulates a hole loop with the specified configuration.
 pub fn generate_hole_patch(
     mesh: &Mesh,
     hole: &HoleLoop,
-    method: HoleFillMethod,
+    config: HoleFillConfig,
 ) -> Result<MeshPatch, String> {
     let n = hole.vertices.len();
     if n < 3 {
@@ -61,18 +129,25 @@ pub fn generate_hole_patch(
 
     let base_nv = mesh.positions.len() as u32;
 
-    match method {
-        HoleFillMethod::PlanarFan => fill_planar_fan(mesh, hole, base_nv),
-        HoleFillMethod::EarClipping => fill_ear_clipping(mesh, hole, base_nv),
+    match config.method {
+        HoleFillMethod::PlanarFan => fill_planar_fan(mesh, hole, base_nv, config),
+        HoleFillMethod::EarClipping => {
+            if config.bulge.abs() > 0.01 || config.density > 1.2 {
+                fill_liepa_smooth(mesh, hole, base_nv, config)
+            } else {
+                fill_ear_clipping(mesh, hole, base_nv)
+            }
+        }
         HoleFillMethod::MinimalArea => {
-            // Barequet-Sharir DP is O(N^3). For very large holes (> 120 verts), fall back to ear clipping
-            if n <= 120 {
+            if config.bulge.abs() > 0.01 || config.density > 1.2 {
+                fill_liepa_smooth(mesh, hole, base_nv, config)
+            } else if n <= 120 {
                 fill_minimal_area(mesh, hole, base_nv)
             } else {
                 fill_ear_clipping(mesh, hole, base_nv)
             }
         }
-        HoleFillMethod::LiepaSmooth => fill_liepa_smooth(mesh, hole, base_nv),
+        HoleFillMethod::LiepaSmooth => fill_liepa_smooth(mesh, hole, base_nv, config),
     }
 }
 
@@ -86,40 +161,41 @@ pub fn apply_patch(mesh: &mut Mesh, patch: &MeshPatch) {
     mesh.recompute_normals();
 }
 
-/// Fills all specified holes on the mesh in sequence using the chosen method.
+/// Fills all specified holes on the mesh in sequence using the chosen configuration.
 pub fn fill_holes(
     mesh: &Mesh,
     holes: &[HoleLoop],
-    method: HoleFillMethod,
+    config: HoleFillConfig,
 ) -> Result<Mesh, String> {
     let mut working = mesh.clone();
     for hole in holes {
-        let patch = generate_hole_patch(&working, hole, method)?;
+        let patch = generate_hole_patch(&working, hole, config)?;
         apply_patch(&mut working, &patch);
     }
     Ok(working)
 }
 
 // -------------------------------------------------------------------------------------------------
-// Algorithm 1: Planar Fan (Centroid Fan)
+// Algorithm 1: Planar Fan (Centroid Fan with Bulge Option)
 // -------------------------------------------------------------------------------------------------
 
 fn fill_planar_fan(
     mesh: &Mesh,
     hole: &HoleLoop,
     base_nv: u32,
+    config: HoleFillConfig,
 ) -> Result<MeshPatch, String> {
     let n = hole.vertices.len();
-    let center = hole.centroid;
+    let dir = config.direction_mode.compute_vector(hole.normal);
+    let radius = hole.bbox.diagonal() * 0.5;
+    let center = hole.centroid + dir * (radius * config.bulge);
     let center_idx = base_nv;
 
     let mut new_indices = Vec::with_capacity(n * 3);
     for i in 0..n {
         let v0 = hole.vertices[i];
         let v1 = hole.vertices[(i + 1) % n];
-        // Note: Boundary edge from find_boundary_edges is directed v0 -> v1.
-        // To face outward consistently with the adjacent mesh, the filling triangle
-        // traverses the boundary edge in reverse (v1 -> v0 -> center).
+        // Reverse winding to match adjacent boundary orientation
         new_indices.push(v1);
         new_indices.push(v0);
         new_indices.push(center_idx);
@@ -162,18 +238,15 @@ fn fill_ear_clipping(
     let n = hole.vertices.len();
     let positions = &mesh.positions;
 
-    // Build orthonormal 2D coordinate frame (u, v) from hole.normal
     let (u, v) = plane_basis(hole.normal);
     let centroid = hole.centroid;
 
-    // Project 3D loop into 2D polygon
     let mut poly_2d: Vec<glam::Vec2> = Vec::with_capacity(n);
     for &idx in &hole.vertices {
         let p = Vec3::from(positions[idx as usize]) - centroid;
         poly_2d.push(glam::Vec2::new(p.dot(u), p.dot(v)));
     }
 
-    // Determine signed area in 2D
     let mut signed_area = 0.0f32;
     for i in 0..n {
         let p0 = poly_2d[i];
@@ -181,16 +254,13 @@ fn fill_ear_clipping(
         signed_area += p0.x * p1.y - p1.x * p0.y;
     }
 
-    // Triangulate 2D polygon using ear clipping
     let tris_2d = ear_clip_polygon(&poly_2d)?;
 
-    // Map 2D triangle vertex indices to mesh indices
     let mut new_indices = Vec::with_capacity(tris_2d.len() * 3);
     let mut preview_indices = Vec::with_capacity(tris_2d.len() * 3);
 
     for [i0, i1, i2] in tris_2d {
         let (m0, m1, m2) = if signed_area > 0.0 {
-            // CCW in 2D
             (hole.vertices[i0], hole.vertices[i2], hole.vertices[i1])
         } else {
             (hole.vertices[i0], hole.vertices[i1], hole.vertices[i2])
@@ -210,7 +280,6 @@ fn fill_ear_clipping(
         }
     }
 
-    // Build preview positions
     let mut preview_positions = Vec::with_capacity(n);
     for &v_idx in &hole.vertices {
         preview_positions.push(positions[v_idx as usize]);
@@ -233,7 +302,6 @@ fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
     let mut remaining: Vec<usize> = (0..n).collect();
     let mut triangles = Vec::with_capacity(n - 2);
 
-    // Compute polygon winding
     let mut area = 0.0f32;
     for i in 0..n {
         let p0 = poly[i];
@@ -257,14 +325,12 @@ fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
             let b = poly[curr];
             let c = poly[next];
 
-            // Convexity check
             let cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
             let is_convex = if ccw { cross > 1e-9 } else { cross < -1e-9 };
             if !is_convex {
                 continue;
             }
 
-            // Check if any other point lies inside triangle (a, b, c)
             let mut point_inside = false;
             for &p_idx in &remaining {
                 if p_idx == prev || p_idx == curr || p_idx == next {
@@ -277,7 +343,6 @@ fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
             }
 
             if !point_inside {
-                // Ear found!
                 triangles.push([prev, curr, next]);
                 remaining.remove(i);
                 ear_found = true;
@@ -286,7 +351,6 @@ fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
         }
 
         if !ear_found {
-            // Degenerate or self-intersecting polygon fallback: clip first triangle
             triangles.push([remaining[0], remaining[1], remaining[2]]);
             remaining.remove(1);
         }
@@ -329,12 +393,9 @@ fn fill_minimal_area(
         .map(|&idx| Vec3::from(positions[idx as usize]))
         .collect();
 
-    // Table of minimal areas: cost[i][j] is min area for sub-polygon pts[i..=j]
-    // Table of split indices: split[i][j] is the vertex k minimizing the cost
     let mut cost = vec![vec![0.0f32; n]; n];
     let mut split = vec![vec![0usize; n]; n];
 
-    // Subproblems of length L from 2 to n-1
     for len in 2..n {
         for i in 0..(n - len) {
             let j = i + len;
@@ -359,7 +420,6 @@ fn fill_minimal_area(
         }
     }
 
-    // Reconstruct triangles recursively
     let mut tri_indices_local: Vec<[usize; 3]> = Vec::with_capacity(n - 2);
     fn reconstruct(
         i: usize,
@@ -377,7 +437,6 @@ fn fill_minimal_area(
     }
     reconstruct(0, n - 1, &split, &mut tri_indices_local);
 
-    // Ensure normal orientation matches hole.normal
     let mut new_indices = Vec::with_capacity(tri_indices_local.len() * 3);
     let mut preview_indices = Vec::with_capacity(tri_indices_local.len() * 3);
 
@@ -387,7 +446,6 @@ fn fill_minimal_area(
         let p2 = pts[i2];
         let tri_n = (p1 - p0).cross(p2 - p0);
 
-        // We want the fill normal to be oriented in the same direction as hole.normal
         let (v0, v1, v2) = if tri_n.dot(hole.normal) < 0.0 {
             (i0, i2, i1)
         } else {
@@ -417,13 +475,14 @@ fn fill_minimal_area(
 }
 
 // -------------------------------------------------------------------------------------------------
-// Algorithm 4: Liepa (2003) Refined & Faired Surface
+// Algorithm 4: Liepa (2003) Refined & Faired Surface with Meshmixer-Style Bulge & Density
 // -------------------------------------------------------------------------------------------------
 
 fn fill_liepa_smooth(
     mesh: &Mesh,
     hole: &HoleLoop,
     base_nv: u32,
+    config: HoleFillConfig,
 ) -> Result<MeshPatch, String> {
     // 1. Initial triangulation via Minimal Area (or Ear Clipping fallback)
     let initial_patch = if hole.vertices.len() <= 80 {
@@ -439,41 +498,72 @@ fn fill_liepa_smooth(
         .map(|&idx| Vec3::from(mesh.positions[idx as usize]))
         .collect();
 
-    // Map initial local triangles: (0..n_boundary)
     let mut tri_locals: Vec<[usize; 3]> = Vec::new();
     for chunk in initial_patch.preview_indices.chunks_exact(3) {
         tri_locals.push([chunk[0] as usize, chunk[1] as usize, chunk[2] as usize]);
     }
 
-    // 2. Refinement: Subdivide triangles that are significantly larger than the average boundary edge length
-    let target_edge_len = hole.perimeter / (n_boundary as f32).max(1.0);
-    let target_area = 0.433 * target_edge_len * target_edge_len * 2.5; // ~ equilateral triangle area * factor
+    // 2. Adaptive Refinement:
+    // Scale target edge length by config.density
+    let density = config.density.clamp(0.2, 4.0);
+    let target_edge_len = (hole.perimeter / (n_boundary as f32).max(1.0)) / density;
+    let target_area = 0.433 * target_edge_len * target_edge_len * 2.0;
 
-    // Refinement: 1-to-3 centroid subdivision for large triangles
-    let mut refined_tris = Vec::new();
-    for [i0, i1, i2] in tri_locals {
-        let p0 = positions_local[i0];
-        let p1 = positions_local[i1];
-        let p2 = positions_local[i2];
-        let area = (p1 - p0).cross(p2 - p0).length() * 0.5;
+    // Multi-pass refinement if high density requested
+    let passes = if density > 1.4 { 2 } else { 1 };
+    let mut refined_tris = tri_locals;
 
-        if area > target_area {
-            let centroid = (p0 + p1 + p2) * (1.0 / 3.0);
-            let c_idx = positions_local.len();
-            positions_local.push(centroid);
+    for _ in 0..passes {
+        let mut next_tris = Vec::with_capacity(refined_tris.len() * 3);
+        for [i0, i1, i2] in refined_tris {
+            let p0 = positions_local[i0];
+            let p1 = positions_local[i1];
+            let p2 = positions_local[i2];
+            let area = (p1 - p0).cross(p2 - p0).length() * 0.5;
 
-            refined_tris.push([i0, i1, c_idx]);
-            refined_tris.push([i1, i2, c_idx]);
-            refined_tris.push([i2, i0, c_idx]);
-        } else {
-            refined_tris.push([i0, i1, i2]);
+            if area > target_area {
+                let centroid = (p0 + p1 + p2) * (1.0 / 3.0);
+                let c_idx = positions_local.len();
+                positions_local.push(centroid);
+
+                next_tris.push([i0, i1, c_idx]);
+                next_tris.push([i1, i2, c_idx]);
+                next_tris.push([i2, i0, c_idx]);
+            } else {
+                next_tris.push([i0, i1, i2]);
+            }
+        }
+        refined_tris = next_tris;
+    }
+
+    // 3. Bulge / Curvature Application:
+    // Displace newly created interior vertices along the chosen direction vector
+    let radius = (hole.bbox.diagonal() * 0.5).max(1e-4);
+    let dir = config.direction_mode.compute_vector(hole.normal);
+
+    if config.bulge.abs() > 0.001 && positions_local.len() > n_boundary {
+        for v in n_boundary..positions_local.len() {
+            let p = positions_local[v];
+            // Compute minimum distance to boundary loop
+            let mut min_dist_sq = f32::MAX;
+            for b in 0..n_boundary {
+                let d_sq = (positions_local[b] - p).length_squared();
+                if d_sq < min_dist_sq {
+                    min_dist_sq = d_sq;
+                }
+            }
+            let min_dist = min_dist_sq.sqrt();
+            let rel_depth = (min_dist / radius).clamp(0.0, 1.0);
+            // Sinusoidal dome height profile: 0 at rim, 1 at center
+            let dome_factor = (rel_depth * std::f32::consts::FRAC_PI_2).sin();
+            let offset = dir * (radius * config.bulge * dome_factor);
+            positions_local[v] += offset;
         }
     }
 
-    // 3. Fairing: Umbrella / Laplacian smoothing on interior vertices (boundary fixed)
+    // 4. Fairing: Umbrella / Laplacian smoothing on interior vertices (boundary fixed)
     let num_total_verts = positions_local.len();
     if num_total_verts > n_boundary {
-        // Build adjacency for interior vertices
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_total_verts];
         for &[i0, i1, i2] in &refined_tris {
             adj[i0].push(i1);
@@ -484,14 +574,15 @@ fn fill_liepa_smooth(
             adj[i2].push(i1);
         }
 
-        // Clean duplicates in adj
         for list in &mut adj {
             list.sort_unstable();
             list.dedup();
         }
 
-        // 20 iterations of Laplacian smoothing
-        for _ in 0..20 {
+        let iters = config.smooth_iterations.clamp(2, 60);
+        let damp_rate = if config.bulge.abs() > 0.05 { 0.35 } else { 0.5 };
+
+        for _ in 0..iters {
             let mut next_pos = positions_local.clone();
             for v in n_boundary..num_total_verts {
                 let neighbors = &adj[v];
@@ -503,8 +594,7 @@ fn fill_liepa_smooth(
                     sum += positions_local[nb];
                 }
                 let avg = sum / (neighbors.len() as f32);
-                // Damped update
-                next_pos[v] = positions_local[v] + (avg - positions_local[v]) * 0.5;
+                next_pos[v] = positions_local[v] + (avg - positions_local[v]) * damp_rate;
             }
             positions_local = next_pos;
         }

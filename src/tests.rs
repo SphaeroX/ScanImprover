@@ -815,7 +815,8 @@ mod tests {
     fn test_hole_filling_all_algorithms() {
         use crate::geom::hole_detect::detect_holes;
         use crate::geom::hole_fill::{
-            HoleFillMethod, apply_patch, fill_holes, generate_hole_patch,
+            FillDirectionMode, HoleFillConfig, HoleFillMethod, apply_patch, fill_holes,
+            generate_hole_patch,
         };
 
         let m = box_mesh(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
@@ -830,8 +831,11 @@ mod tests {
 
         // 1. Planar Fan
         let mut m_fan = m_open.clone();
-        let patch_fan =
-            generate_hole_patch(&m_fan, target_hole, HoleFillMethod::PlanarFan).unwrap();
+        let cfg_fan = HoleFillConfig {
+            method: HoleFillMethod::PlanarFan,
+            ..Default::default()
+        };
+        let patch_fan = generate_hole_patch(&m_fan, target_hole, cfg_fan).unwrap();
         apply_patch(&mut m_fan, &patch_fan);
         let holes_after_fan = detect_holes(&m_fan);
         assert_eq!(
@@ -842,8 +846,11 @@ mod tests {
 
         // 2. Ear Clipping
         let mut m_ear = m_open.clone();
-        let patch_ear =
-            generate_hole_patch(&m_ear, target_hole, HoleFillMethod::EarClipping).unwrap();
+        let cfg_ear = HoleFillConfig {
+            method: HoleFillMethod::EarClipping,
+            ..Default::default()
+        };
+        let patch_ear = generate_hole_patch(&m_ear, target_hole, cfg_ear).unwrap();
         apply_patch(&mut m_ear, &patch_ear);
         let holes_after_ear = detect_holes(&m_ear);
         assert_eq!(
@@ -854,8 +861,11 @@ mod tests {
 
         // 3. Minimal Area Triangulation
         let mut m_area = m_open.clone();
-        let patch_area =
-            generate_hole_patch(&m_area, target_hole, HoleFillMethod::MinimalArea).unwrap();
+        let cfg_area = HoleFillConfig {
+            method: HoleFillMethod::MinimalArea,
+            ..Default::default()
+        };
+        let patch_area = generate_hole_patch(&m_area, target_hole, cfg_area).unwrap();
         apply_patch(&mut m_area, &patch_area);
         let holes_after_area = detect_holes(&m_area);
         assert_eq!(
@@ -866,8 +876,11 @@ mod tests {
 
         // 4. Liepa Smooth (Refined & Faired)
         let mut m_liepa = m_open.clone();
-        let patch_liepa =
-            generate_hole_patch(&m_liepa, target_hole, HoleFillMethod::LiepaSmooth).unwrap();
+        let cfg_liepa = HoleFillConfig {
+            method: HoleFillMethod::LiepaSmooth,
+            ..Default::default()
+        };
+        let patch_liepa = generate_hole_patch(&m_liepa, target_hole, cfg_liepa).unwrap();
         apply_patch(&mut m_liepa, &patch_liepa);
         let holes_after_liepa = detect_holes(&m_liepa);
         assert_eq!(
@@ -876,9 +889,65 @@ mod tests {
             "Mesh must be closed after LiepaSmooth"
         );
 
-        // 5. Batch fill all holes
-        let filled_batch = fill_holes(&m_open, &holes, HoleFillMethod::MinimalArea).unwrap();
+        // 5. Meshmixer-style Bulge & Density test
+        let mut m_bulge = m_open.clone();
+        let cfg_bulge = HoleFillConfig {
+            method: HoleFillMethod::LiepaSmooth,
+            density: 2.0,
+            bulge: 0.8,
+            direction_mode: FillDirectionMode::AutoNormal,
+            smooth_iterations: 20,
+        };
+        let patch_bulge = generate_hole_patch(&m_bulge, target_hole, cfg_bulge).unwrap();
+        assert!(!patch_bulge.new_positions.is_empty(), "High density Liepa should add interior vertices");
+        apply_patch(&mut m_bulge, &patch_bulge);
+        assert_eq!(detect_holes(&m_bulge).len(), 0);
+
+        // 6. Batch fill all holes
+        let filled_batch = fill_holes(&m_open, &holes, cfg_area).unwrap();
         assert_eq!(detect_holes(&filled_batch).len(), 0);
+    }
+
+    #[test]
+    fn test_undo_redo_history_stack() {
+        let mut app = crate::app::App::new();
+        let m = box_mesh(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        let arc_m = std::sync::Arc::new(m);
+        app.current = Some(arc_m.clone());
+        app.original = Some(arc_m);
+
+        assert_eq!(app.undo.len(), 0);
+        assert_eq!(app.redo.len(), 0);
+
+        // Action 1: Translate mesh
+        app.apply_transform(glam::Quat::IDENTITY, Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(app.undo.len(), 1);
+        assert_eq!(app.redo.len(), 0);
+        assert!((app.bbox.center().x - 10.0).abs() < 1e-3);
+
+        // Action 2: Translate mesh again
+        app.apply_transform(glam::Quat::IDENTITY, Vec3::new(0.0, 20.0, 0.0));
+        assert_eq!(app.undo.len(), 2);
+        assert_eq!(app.redo.len(), 0);
+        assert!((app.bbox.center().y - 20.0).abs() < 1e-3);
+
+        // Undo once -> back to (10, 0, 0)
+        app.undo();
+        assert_eq!(app.undo.len(), 1);
+        assert_eq!(app.redo.len(), 1);
+        assert!((app.bbox.center().y - 0.0).abs() < 1e-3);
+
+        // Redo -> forward to (10, 20, 0)
+        app.redo();
+        assert_eq!(app.undo.len(), 2);
+        assert_eq!(app.redo.len(), 0);
+        assert!((app.bbox.center().y - 20.0).abs() < 1e-3);
+
+        // Undo again, then make a NEW action -> redo stack must be cleared!
+        app.undo();
+        assert_eq!(app.redo.len(), 1);
+        app.apply_transform(glam::Quat::IDENTITY, Vec3::new(0.0, 0.0, 30.0));
+        assert_eq!(app.redo.len(), 0, "New action must clear redo stack");
     }
 
     #[test]

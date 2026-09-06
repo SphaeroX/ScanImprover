@@ -513,13 +513,15 @@ pub fn render_coordinates(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     group_box(ui, Some("HISTORY & RESET"), |ui| {
         ui.horizontal(|ui| {
-            if ui.button("Undo").clicked() {
+            if ui.add_enabled(!app.undo.is_empty(), egui::Button::new("⮌ Undo")).clicked() {
                 app.undo();
+            }
+            if ui.add_enabled(!app.redo.is_empty(), egui::Button::new("⮎ Redo")).clicked() {
+                app.redo();
             }
             if ui.button("Reset mesh").clicked() {
                 app.reset_mesh();
             }
-            ui.label(format!("{} undo steps", app.undo.len()));
         });
     });
 }

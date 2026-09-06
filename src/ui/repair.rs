@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::geom::hole_fill::HoleFillMethod;
+use crate::geom::hole_fill::{FillDirectionMode, HoleFillMethod};
 use crate::ui::accordion::group_box;
 use eframe::egui;
 
@@ -13,7 +13,7 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     let health_opt = app.repair_health.clone();
     let holes_clone = app.repair_holes.clone();
     let selected_hole = app.repair_selected_hole;
-    let curr_method = app.repair_method;
+    let mut config = app.repair_config;
     let mut preview_active = app.repair_preview_active;
 
     // Deferred actions to avoid borrowing conflicts
@@ -21,7 +21,7 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     let mut do_auto_repair = false;
     let mut do_focus = false;
     let mut new_selection: Option<Option<usize>> = None;
-    let mut new_method: Option<HoleFillMethod> = None;
+    let mut config_changed = false;
     let mut new_preview_active: Option<bool> = None;
     let mut do_fill_selected = false;
     let mut do_fill_all = false;
@@ -187,17 +187,80 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
 
     ui.add_space(4.0);
 
-    // 3. HOLE FILLING & PREVIEW
-    group_box(ui, Some("HOLE FILLING"), |ui| {
+    // 3. HOLE FILLING & MESHMUXER-STYLE CONTOUR CONTROLS
+    group_box(ui, Some("HOLE FILLING (CONTOUR & SHAPE)"), |ui| {
         ui.label(egui::RichText::new("Filling Algorithm:").strong());
-        for method in HoleFillMethod::all() {
-            let selected = curr_method == method;
-            if ui.radio(selected, method.display_name()).clicked() {
-                new_method = Some(method);
+        ui.horizontal(|ui| {
+            for method in HoleFillMethod::all() {
+                if ui.selectable_value(&mut config.method, method, method.display_name()).clicked() {
+                    config_changed = true;
+                }
             }
-        }
+        });
 
-        ui.add_space(3.0);
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(2.0);
+
+        // Density / Resolution (Feinheit)
+        ui.horizontal(|ui| {
+            ui.label("Density / Feinheit:");
+            let resp = ui.add(
+                egui::Slider::new(&mut config.density, 0.2..=3.0)
+                    .step_by(0.1)
+                    .suffix("×")
+            );
+            if resp.changed() {
+                config_changed = true;
+            }
+            if ui.small_button("1.0×").on_hover_text("Reset to standard density").clicked() {
+                config.density = 1.0;
+                config_changed = true;
+            }
+        });
+
+        // Bulge / Roundness / Flatness (Rundung, Wölbung vs Flach)
+        ui.horizontal(|ui| {
+            ui.label("Bulge / Rundung:");
+            let resp = ui.add(
+                egui::Slider::new(&mut config.bulge, -1.0..=1.0)
+                    .step_by(0.05)
+            );
+            if resp.changed() {
+                config_changed = true;
+            }
+            if ui.small_button("Flat (0)").on_hover_text("Set completely flat minimal surface").clicked() {
+                config.bulge = 0.0;
+                config_changed = true;
+            }
+        });
+
+        // Direction mode (Richtung)
+        ui.horizontal(|ui| {
+            ui.label("Direction:");
+            for dir in FillDirectionMode::all() {
+                if ui.selectable_value(&mut config.direction_mode, dir, dir.display_name()).clicked() {
+                    config_changed = true;
+                }
+            }
+        });
+
+        // Fairing / Smoothing iterations (Glättung)
+        ui.horizontal(|ui| {
+            ui.label("Smoothing steps:");
+            let resp = ui.add(
+                egui::Slider::new(&mut config.smooth_iterations, 5..=50)
+                    .suffix(" iters")
+            );
+            if resp.changed() {
+                config_changed = true;
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(2.0);
+
         if ui.checkbox(&mut preview_active, "Show preview in viewport").changed() {
             new_preview_active = Some(preview_active);
         }
@@ -267,8 +330,8 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     if let Some(sel) = new_selection {
         app.select_hole(sel);
     }
-    if let Some(m) = new_method {
-        app.set_hole_fill_method(m);
+    if config_changed {
+        app.set_hole_fill_config(config);
     }
     if let Some(p) = new_preview_active {
         app.set_hole_preview_active(p);
