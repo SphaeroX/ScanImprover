@@ -1,16 +1,16 @@
 #[cfg(test)]
 mod tests {
+    use crate::decimate;
     use crate::geom::boundary::{find_boundary_edges, generate_hole_mask};
-    use crate::geom::bvh::{closest_point_triangle, Bvh};
+    use crate::geom::bvh::{Bvh, closest_point_triangle};
+    use crate::geom::distance::deviation;
     use crate::geom::fitting::{fit_circle, fit_plane};
     use crate::geom::symmetry::{
-        detect_symmetry, detect_symmetry_from_line, refine_symmetry, SymPlane,
+        SymPlane, detect_symmetry, detect_symmetry_from_line, refine_symmetry,
     };
-    use crate::geom::distance::deviation;
     use crate::io;
     use crate::mesh::Mesh;
     use crate::rng::Rng;
-    use crate::decimate;
     use glam::Vec3;
     use std::path::Path;
 
@@ -19,16 +19,18 @@ mod tests {
         let (y0, y1) = (cy - sy * 0.5, cy + sy * 0.5);
         let (z0, z1) = (cz - sz * 0.5, cz + sz * 0.5);
         let v: Vec<[f32; 3]> = vec![
-            [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-            [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
         ];
         let idx: Vec<u32> = vec![
-            0, 1, 2, 0, 2, 3,
-            4, 6, 5, 4, 7, 6,
-            0, 3, 7, 0, 7, 4,
-            1, 5, 6, 1, 6, 2,
-            0, 4, 5, 0, 5, 1,
-            3, 2, 6, 3, 6, 7,
+            0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2, 0, 4, 5, 0, 5,
+            1, 3, 2, 6, 3, 6, 7,
         ];
         Mesh::from_indexed(v, idx)
     }
@@ -142,10 +144,7 @@ mod tests {
                 let (_, d2) = closest_point_triangle(p, a, b, c);
                 best = best.min(d2.sqrt());
             }
-            assert!(
-                (d_bvh - best).abs() < 1e-4,
-                "bvh {d_bvh} vs brute {best}"
-            );
+            assert!((d_bvh - best).abs() < 1e-4, "bvh {d_bvh} vs brute {best}");
         }
     }
 
@@ -167,9 +166,10 @@ mod tests {
         assert!(hit.is_some());
         let (t, _) = hit.unwrap();
         assert!((t - 4.0).abs() < 1e-4, "hit at t={t}");
-        assert!(bvh
-            .ray_cast(Vec3::new(-5.0, 0.0, 0.0), -Vec3::X, 100.0)
-            .is_none());
+        assert!(
+            bvh.ray_cast(Vec3::new(-5.0, 0.0, 0.0), -Vec3::X, 100.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -242,8 +242,8 @@ mod tests {
         let bvh = Bvh::new(&m.positions, &m.indices);
         let a = Vec3::new(0.0, 1.0, 0.5);
         let b = Vec3::new(0.0, -1.0, -0.5);
-        let (plane, rms) = detect_symmetry_from_line(&m, &bvh, a, b, None)
-            .expect("symmetry from line failed");
+        let (plane, rms) =
+            detect_symmetry_from_line(&m, &bvh, a, b, None).expect("symmetry from line failed");
         assert!(plane.normal.x.abs() > 0.99, "normal {:?}", plane.normal);
         assert!(plane.point.x.abs() < 0.05, "point {:?}", plane.point);
         assert!(rms < 0.05, "rms {rms}");
@@ -280,9 +280,16 @@ mod tests {
     fn boundary_hole_detection_watertight_and_open() {
         let m = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
         let b_edges = find_boundary_edges(&m);
-        assert_eq!(b_edges.len(), 0, "watertight box should have 0 boundary edges");
+        assert_eq!(
+            b_edges.len(),
+            0,
+            "watertight box should have 0 boundary edges"
+        );
         let mask = generate_hole_mask(&m, 2);
-        assert!(mask.iter().all(|&v| v == 0), "watertight mask should be empty");
+        assert!(
+            mask.iter().all(|&v| v == 0),
+            "watertight mask should be empty"
+        );
 
         // Open mesh: remove 2 triangles (indices 0..6) from box
         let mut open_indices = m.indices.clone();
@@ -291,7 +298,10 @@ mod tests {
         let open_edges = find_boundary_edges(&open_m);
         assert!(!open_edges.is_empty(), "open mesh must have boundary edges");
         let open_mask = generate_hole_mask(&open_m, 2);
-        assert!(open_mask.iter().any(|&v| v > 0), "open mesh mask should have masked triangles");
+        assert!(
+            open_mask.iter().any(|&v| v > 0),
+            "open mesh mask should have masked triangles"
+        );
     }
 
     #[test]
@@ -427,8 +437,13 @@ mod tests {
         cam.aspect = 4.0 / 3.0;
         cam.orient = glam::Quat::from_rotation_arc(Vec3::Z, -Vec3::X);
         let (ro, rd) = cam.screen_ray(400.0, 300.0, 800.0, 600.0);
-        let (t, tri) = bvh.ray_cast(ro, rd, cam.far).expect("center ray should hit");
-        let hit = pick::Hit { pos: ro + rd * t, tri };
+        let (t, tri) = bvh
+            .ray_cast(ro, rd, cam.far)
+            .expect("center ray should hit");
+        let hit = pick::Hit {
+            pos: ro + rd * t,
+            tri,
+        };
         let mut sel = vec![0u8; m.triangle_count()];
         pick::brush(&m, &bvh, &cam, &hit, 40.0, 600.0, true, &mut sel);
         assert!(
@@ -524,7 +539,10 @@ mod tests {
 
         // While mouse is still held down from point 2 click, suppress_sel_drag is true:
         assert!(app.suppress_sel_drag);
-        assert_eq!(app.sel_count, 0, "No faces must be selected during pick line placement");
+        assert_eq!(
+            app.sel_count, 0,
+            "No faces must be selected during pick line placement"
+        );
 
         // Once mouse is released, suppress_sel_drag resets to false:
         app.suppress_sel_drag = false;
@@ -553,8 +571,13 @@ mod tests {
         cam.aspect = 4.0 / 3.0;
         cam.orient = glam::Quat::from_rotation_arc(Vec3::Z, -Vec3::X);
         let (ro, rd) = cam.screen_ray(400.0, 300.0, 800.0, 600.0);
-        let (t, tri) = bvh.ray_cast(ro, rd, cam.far).expect("center ray should hit");
-        let hit = pick::Hit { pos: ro + rd * t, tri };
+        let (t, tri) = bvh
+            .ray_cast(ro, rd, cam.far)
+            .expect("center ray should hit");
+        let hit = pick::Hit {
+            pos: ro + rd * t,
+            tri,
+        };
 
         let mut sel = (*app.sel).clone();
         pick::brush(&m, &bvh, &cam, &hit, 40.0, 600.0, true, &mut sel);
@@ -627,5 +650,128 @@ mod tests {
         assert!(dxf_content.contains("POINT"));
         assert!(dxf_content.contains("EOF"));
     }
-}
 
+    #[test]
+    fn feature_alignment_quick_surface_workflow() {
+        use crate::app::{App, SymState};
+        use crate::geom::alignment::{AxisChoice, FeatureRef};
+        use crate::geom::fitting::{CircleFit, FittedCircle, FittedPlane, PlaneFit};
+        use crate::geom::symmetry::SymPlane;
+
+        let mut app = App::new();
+        let dummy_mesh = std::sync::Arc::new(crate::mesh::Mesh::default());
+        app.current = Some(dummy_mesh.clone());
+        app.original = Some(dummy_mesh);
+
+        // 1. Setup Symmetry Plane (pointing along Y initially)
+        app.sym = Some(SymState {
+            plane: SymPlane {
+                point: Vec3::new(0.0, 10.0, 0.0),
+                normal: Vec3::Y,
+            },
+            rms: 0.001,
+            show: true,
+        });
+
+        // 2. Setup Circle (axis along X initially, center at 50, 10, 30)
+        let circle = FittedCircle {
+            id: 1,
+            name: "Main Bore".to_string(),
+            fit: CircleFit {
+                center: Vec3::new(50.0, 10.0, 30.0),
+                normal: Vec3::X,
+                radius: 12.0,
+                plane_rms: 0.001,
+                radial_rms: 0.001,
+                radial_max: 0.002,
+            },
+            visible: true,
+            color: [0.0, 1.0, 0.0, 1.0],
+        };
+        app.circles.push(circle);
+
+        // 3. Setup Plane (normal along Z initially, point at 0, 0, 25)
+        let plane = FittedPlane {
+            id: 2,
+            name: "Base Plane".to_string(),
+            fit: PlaneFit {
+                point: Vec3::new(0.0, 0.0, 25.0),
+                normal: Vec3::Z,
+                rms: 0.001,
+                max_dev: 0.002,
+            },
+            visible: true,
+            color: [1.0, 0.0, 0.0, 1.0],
+        };
+        app.planes.push(plane);
+
+        // Assign Symmetry Plane to X
+        app.toggle_assign_feature(FeatureRef::SymmetryPlane, AxisChoice::X);
+        assert_eq!(
+            app.feature_assigned_axis(FeatureRef::SymmetryPlane),
+            Some(AxisChoice::X)
+        );
+
+        // Assign Circle to Z
+        app.toggle_assign_feature(FeatureRef::Circle(1), AxisChoice::Z);
+        assert_eq!(
+            app.feature_assigned_axis(FeatureRef::Circle(1)),
+            Some(AxisChoice::Z)
+        );
+
+        // Assign Plane to Y
+        app.toggle_assign_feature(FeatureRef::Plane(2), AxisChoice::Y);
+        assert_eq!(
+            app.feature_assigned_axis(FeatureRef::Plane(2)),
+            Some(AxisChoice::Y)
+        );
+
+        // Set Origin to Circle Center
+        app.toggle_origin_feature(FeatureRef::Circle(1));
+        assert!(app.is_feature_origin(FeatureRef::Circle(1)));
+
+        // Run alignment!
+        let success = app.align_to_features();
+        assert!(success, "align_to_features should succeed");
+
+        // Verify Symmetry Plane normal is now along X (or -X)
+        let sym_norm = app.sym.unwrap().plane.normal;
+        assert!(
+            (sym_norm.abs() - Vec3::X).length() < 1e-4,
+            "Symmetry normal should be along X, got {:?}",
+            sym_norm
+        );
+
+        // Verify Circle normal (axis) is now along Z (or -Z)
+        let circ_norm = app.circles[0].fit.normal;
+        assert!(
+            (circ_norm.abs() - Vec3::Z).length() < 1e-4,
+            "Circle axis should be along Z, got {:?}",
+            circ_norm
+        );
+
+        // Verify Plane normal is now along Y (or -Y)
+        let plane_norm = app.planes[0].fit.normal;
+        assert!(
+            (plane_norm.abs() - Vec3::Y).length() < 1e-4,
+            "Plane normal should be along Y, got {:?}",
+            plane_norm
+        );
+
+        // Verify Circle Center is at origin (0, 0, 0)
+        let circ_center = app.circles[0].fit.center;
+        assert!(
+            circ_center.length() < 1e-4,
+            "Circle center should be at (0,0,0), got {:?}",
+            circ_center
+        );
+
+        // Test Undo
+        assert_eq!(app.undo.len(), 1);
+        app.undo();
+        assert!(
+            (app.circles[0].fit.center - Vec3::new(50.0, 10.0, 30.0)).length() < 1e-4,
+            "Undo should restore previous circle center"
+        );
+    }
+}

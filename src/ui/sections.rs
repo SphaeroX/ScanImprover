@@ -1,4 +1,4 @@
-use crate::app::{rotation_between, App, DecMode, Mode};
+use crate::app::{App, DecMode, Mode, rotation_between};
 use crate::ui::accordion::group_box;
 use eframe::egui;
 use glam::Vec3;
@@ -19,81 +19,78 @@ pub fn render_decimation(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 
     let mut schedule_manual = false;
-    group_box(ui, Some("PARAMETERS"), |ui| {
-        match app.dec_mode {
-            DecMode::Fixed => {
-                let err_resp = ui.add(
-                    egui::Slider::new(&mut app.dec_error_mm, 0.0001..=1.0)
-                        .logarithmic(true)
-                        .text("Error tolerance (mm)"),
-                );
-                let ratio_resp = ui.add(
-                    egui::Slider::new(&mut app.dec_ratio, 0.002..=1.0)
-                        .text("Target triangle ratio"),
-                );
-                ui.checkbox(&mut app.dec_auto_preview, "Auto preview on change");
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Preview now").clicked() {
-                        schedule_manual = true;
-                    }
-                    if app.dec_job.is_some() {
-                        ui.add(egui::Spinner::new());
-                        ui.label("working…");
-                    }
-                });
-                if err_resp.drag_stopped() || ratio_resp.drag_stopped() {
-                    if app.dec_auto_preview && app.dec_job.is_none() {
-                        schedule_manual = true;
-                    }
+    group_box(ui, Some("PARAMETERS"), |ui| match app.dec_mode {
+        DecMode::Fixed => {
+            let err_resp = ui.add(
+                egui::Slider::new(&mut app.dec_error_mm, 0.0001..=1.0)
+                    .logarithmic(true)
+                    .text("Error tolerance (mm)"),
+            );
+            let ratio_resp = ui.add(
+                egui::Slider::new(&mut app.dec_ratio, 0.002..=1.0).text("Target triangle ratio"),
+            );
+            ui.checkbox(&mut app.dec_auto_preview, "Auto preview on change");
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui.button("Preview now").clicked() {
+                    schedule_manual = true;
+                }
+                if app.dec_job.is_some() {
+                    ui.add(egui::Spinner::new());
+                    ui.label("working…");
+                }
+            });
+            if err_resp.drag_stopped() || ratio_resp.drag_stopped() {
+                if app.dec_auto_preview && app.dec_job.is_none() {
+                    schedule_manual = true;
                 }
             }
-            DecMode::Accuracy | DecMode::Deviation => {
-                let diag = app.bbox.diagonal().max(1e-9);
-                if app.dec_mode == DecMode::Accuracy {
-                    let mut acc = app.dec_target_acc;
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut acc)
-                            .range(90.0..=99.9999)
-                            .speed(0.02)
-                            .prefix("target ≥ ")
-                            .suffix(" %")
-                            .fixed_decimals(3),
-                    );
-                    if resp.changed() {
-                        app.dec_target_acc = acc;
-                        app.dec_target_mm = ((1.0 - acc / 100.0) * diag).max(1e-6);
-                    }
-                } else {
-                    let mut mm = app.dec_target_mm;
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut mm)
-                            .range(0.0001..=10.0)
-                            .speed(0.01)
-                            .prefix("target ≤ ")
-                            .suffix(" mm")
-                            .fixed_decimals(4),
-                    );
-                    if resp.changed() {
-                        app.dec_target_mm = mm;
-                        app.dec_target_acc = 100.0 * (1.0 - mm / diag);
-                    }
+        }
+        DecMode::Accuracy | DecMode::Deviation => {
+            let diag = app.bbox.diagonal().max(1e-9);
+            if app.dec_mode == DecMode::Accuracy {
+                let mut acc = app.dec_target_acc;
+                let resp = ui.add(
+                    egui::DragValue::new(&mut acc)
+                        .range(90.0..=99.9999)
+                        .speed(0.02)
+                        .prefix("target ≥ ")
+                        .suffix(" %")
+                        .fixed_decimals(3),
+                );
+                if resp.changed() {
+                    app.dec_target_acc = acc;
+                    app.dec_target_mm = ((1.0 - acc / 100.0) * diag).max(1e-6);
                 }
-                ui.label(format!(
-                    "Goal: max deviation {:.4} mm = {:.4} % accuracy",
-                    app.dec_target_mm, app.dec_target_acc
-                ));
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Auto decimate").clicked() {
-                        app.run_auto_decimate();
-                    }
-                    if app.dec_job.is_some() {
-                        ui.add(egui::Spinner::new());
-                        ui.label("working…");
-                    }
-                });
+            } else {
+                let mut mm = app.dec_target_mm;
+                let resp = ui.add(
+                    egui::DragValue::new(&mut mm)
+                        .range(0.0001..=10.0)
+                        .speed(0.01)
+                        .prefix("target ≤ ")
+                        .suffix(" mm")
+                        .fixed_decimals(4),
+                );
+                if resp.changed() {
+                    app.dec_target_mm = mm;
+                    app.dec_target_acc = 100.0 * (1.0 - mm / diag);
+                }
             }
+            ui.label(format!(
+                "Goal: max deviation {:.4} mm = {:.4} % accuracy",
+                app.dec_target_mm, app.dec_target_acc
+            ));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui.button("Auto decimate").clicked() {
+                    app.run_auto_decimate();
+                }
+                if app.dec_job.is_some() {
+                    ui.add(egui::Spinner::new());
+                    ui.label("working…");
+                }
+            });
         }
     });
 
@@ -119,13 +116,16 @@ pub fn render_decimation(app: &mut App, ui: &mut egui::Ui) {
             });
     }
 
-    let metrics_info = app.orig_mesh().zip(app.preview.as_ref()).map(|(orig, prev)| {
-        (
-            orig.triangle_count(),
-            prev.triangle_count(),
-            100.0 * prev.triangle_count() as f32 / orig.triangle_count().max(1) as f32,
-        )
-    });
+    let metrics_info = app
+        .orig_mesh()
+        .zip(app.preview.as_ref())
+        .map(|(orig, prev)| {
+            (
+                orig.triangle_count(),
+                prev.triangle_count(),
+                100.0 * prev.triangle_count() as f32 / orig.triangle_count().max(1) as f32,
+            )
+        });
 
     if let Some((orig_tris, prev_tris, pct)) = metrics_info {
         ui.add_space(4.0);
@@ -268,16 +268,20 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                 let q = rotation_between(sp.normal, axis);
                 app.align_sym_full(axis, q);
             }
+            ui.add_space(3.0);
+            crate::ui::alignment::render_feature_assignment_buttons(
+                app,
+                ui,
+                crate::geom::alignment::FeatureRef::SymmetryPlane,
+            );
         });
     }
 }
 
-/// Renders the Selection & Fitting section inside the accordion body.
-pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
+/// Renders the permanent Brush Selection tool pinned at the top of the left panel.
+pub fn render_brush_selection(app: &mut App, ui: &mut egui::Ui) {
     group_box(ui, Some("BRUSH SELECTION"), |ui| {
-        ui.add(
-            egui::Slider::new(&mut app.brush_radius, 2.0..=150.0).text("Brush radius (px)"),
-        );
+        ui.add(egui::Slider::new(&mut app.brush_radius, 2.0..=150.0).text("Brush radius (px)"));
         ui.add_space(2.0);
         ui.add(
             egui::Slider::new(&mut app.expand_angle_deg, 1.0..=180.0)
@@ -292,11 +296,7 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             if ui.button("Shrink").clicked() {
                 app.shrink_selection();
             }
-            ui.label(
-                egui::RichText::new("(Ctrl + Wheel)")
-                    .weak()
-                    .small(),
-            );
+            ui.label(egui::RichText::new("(Ctrl + Wheel)").weak().small());
         });
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -318,8 +318,10 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             ui.label(format!("{} faces", app.sel_count));
         });
     });
+}
 
-    ui.add_space(4.0);
+/// Renders the Fitting section inside the accordion body.
+pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
     group_box(ui, Some("FIT GEOMETRY"), |ui| {
         ui.horizontal(|ui| {
             if ui.button("Fit plane").clicked() {
@@ -397,6 +399,14 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
                     app.export_plane_id(id);
                 }
             }
+            if let Some(id) = app.selected_plane_id {
+                ui.add_space(3.0);
+                crate::ui::alignment::render_feature_assignment_buttons(
+                    app,
+                    ui,
+                    crate::geom::alignment::FeatureRef::Plane(id),
+                );
+            }
         });
     }
 
@@ -464,12 +474,25 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
                     app.export_circle_id(id);
                 }
             }
+            if let Some(id) = app.selected_circle_id {
+                ui.add_space(3.0);
+                crate::ui::alignment::render_feature_assignment_buttons(
+                    app,
+                    ui,
+                    crate::geom::alignment::FeatureRef::Circle(id),
+                );
+            }
         });
     }
 }
 
 /// Renders the Coordinate System section inside the accordion body.
 pub fn render_coordinates(app: &mut App, ui: &mut egui::Ui) {
+    group_box(ui, Some("FEATURE ALIGNMENT (QUICK SURFACE)"), |ui| {
+        crate::ui::alignment::render_feature_alignment_section(app, ui);
+    });
+
+    ui.add_space(4.0);
     group_box(ui, Some("CENTER ON AXES"), |ui| {
         ui.horizontal(|ui| {
             if ui.button("Center X").clicked() {

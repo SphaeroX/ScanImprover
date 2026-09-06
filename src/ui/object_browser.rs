@@ -20,6 +20,12 @@ enum BrowserAction {
     ExportPlane(u64),
     ExportCircle(u64),
     ExportAllReferences,
+    AlignToFeatures,
+    ToggleAssign(
+        crate::geom::alignment::FeatureRef,
+        crate::geom::alignment::AxisChoice,
+    ),
+    ToggleOrigin(crate::geom::alignment::FeatureRef),
 }
 
 /// Renders the Object Browser window on the right side of the 3D viewport.
@@ -28,6 +34,7 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
         return;
     }
 
+    let align_slots = app.align_slots.clone();
     let mut actions: Vec<BrowserAction> = Vec::new();
 
     let total_count = (if app.display().is_some() { 1 } else { 0 })
@@ -188,6 +195,21 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                     } else {
                         for p in &app.planes {
                             let is_sel = app.selected_plane_id == Some(p.id);
+                            let feat = crate::geom::alignment::FeatureRef::Plane(p.id);
+                            let cur_axis = if align_slots.x == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::X)
+                            } else if align_slots.y == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::Y)
+                            } else if align_slots.z == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::Z)
+                            } else {
+                                None
+                            };
+                            let is_orig = matches!(
+                                align_slots.origin,
+                                crate::geom::alignment::OriginRef::Plane(id) if id == p.id
+                            );
+
                             let col32 = egui::Color32::from_rgba_unmultiplied(
                                 (p.color[0] * 255.0) as u8,
                                 (p.color[1] * 255.0) as u8,
@@ -238,6 +260,12 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                         if name_resp.clicked() {
                                             actions.push(BrowserAction::SelectPlane(p.id));
                                         }
+
+                                        crate::ui::alignment::render_feature_badge_ui(
+                                            ui,
+                                            cur_axis,
+                                            is_orig,
+                                        );
 
                                         // Delete button on the right
                                         ui.with_layout(
@@ -326,6 +354,22 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                                         actions.push(BrowserAction::ExportPlane(p.id));
                                                     }
                                                 });
+                                                ui.add_space(2.0);
+                                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
+                                                    ui,
+                                                    feat,
+                                                    cur_axis,
+                                                    is_orig,
+                                                ) {
+                                                    match action {
+                                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
+                                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
+                                                        }
+                                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
+                                                            actions.push(BrowserAction::ToggleOrigin(feat));
+                                                        }
+                                                    }
+                                                }
                                             });
                                         });
                                     }
@@ -359,6 +403,21 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                     } else {
                         for c in &app.circles {
                             let is_sel = app.selected_circle_id == Some(c.id);
+                            let feat = crate::geom::alignment::FeatureRef::Circle(c.id);
+                            let cur_axis = if align_slots.x == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::X)
+                            } else if align_slots.y == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::Y)
+                            } else if align_slots.z == Some(feat) {
+                                Some(crate::geom::alignment::AxisChoice::Z)
+                            } else {
+                                None
+                            };
+                            let is_orig = matches!(
+                                align_slots.origin,
+                                crate::geom::alignment::OriginRef::CircleCenter(id) if id == c.id
+                            );
+
                             let col32 = egui::Color32::from_rgba_unmultiplied(
                                 (c.color[0] * 255.0) as u8,
                                 (c.color[1] * 255.0) as u8,
@@ -409,6 +468,12 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                         if name_resp.clicked() {
                                             actions.push(BrowserAction::SelectCircle(c.id));
                                         }
+
+                                        crate::ui::alignment::render_feature_badge_ui(
+                                            ui,
+                                            cur_axis,
+                                            is_orig,
+                                        );
 
                                         // Delete button on the right
                                         ui.with_layout(
@@ -497,6 +562,22 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                                         actions.push(BrowserAction::ExportCircle(c.id));
                                                     }
                                                 });
+                                                ui.add_space(2.0);
+                                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
+                                                    ui,
+                                                    feat,
+                                                    cur_axis,
+                                                    is_orig,
+                                                ) {
+                                                    match action {
+                                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
+                                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
+                                                        }
+                                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
+                                                            actions.push(BrowserAction::ToggleOrigin(feat));
+                                                        }
+                                                    }
+                                                }
                                             });
                                         });
                                     }
@@ -506,7 +587,23 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                     }
 
                     // --- SECTION 4: SYMMETRY PLANE (if active) ---
-                    if let Some(s) = &app.sym {
+                    let sym_show = app.sym.map(|s| s.show);
+                    if let Some(mut show) = sym_show {
+                        let feat = crate::geom::alignment::FeatureRef::SymmetryPlane;
+                        let cur_axis = if align_slots.x == Some(feat) {
+                            Some(crate::geom::alignment::AxisChoice::X)
+                        } else if align_slots.y == Some(feat) {
+                            Some(crate::geom::alignment::AxisChoice::Y)
+                        } else if align_slots.z == Some(feat) {
+                            Some(crate::geom::alignment::AxisChoice::Z)
+                        } else {
+                            None
+                        };
+                        let is_orig = matches!(
+                            align_slots.origin,
+                            crate::geom::alignment::OriginRef::SymmetryPlane
+                        );
+
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(4.0);
@@ -524,7 +621,6 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                             .inner_margin(egui::Margin::symmetric(6, 5))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let mut show = s.show;
                                     if ui.checkbox(&mut show, "").changed() {
                                         actions.push(BrowserAction::ToggleSymmetryVisibility);
                                     }
@@ -534,8 +630,56 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                             .strong()
                                             .color(egui::Color32::from_rgb(40, 220, 255)),
                                     );
+                                    crate::ui::alignment::render_feature_badge_ui(
+                                        ui,
+                                        cur_axis,
+                                        is_orig,
+                                    );
                                 });
+                                ui.add_space(2.0);
+                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
+                                    ui,
+                                    feat,
+                                    cur_axis,
+                                    is_orig,
+                                ) {
+                                    match action {
+                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
+                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
+                                        }
+                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
+                                            actions.push(BrowserAction::ToggleOrigin(feat));
+                                        }
+                                    }
+                                }
                             });
+                    }
+
+                    let has_assigned_slots = app.align_slots.x.is_some()
+                        || app.align_slots.y.is_some()
+                        || app.align_slots.z.is_some();
+
+                    if has_assigned_slots {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.vertical_centered(|ui| {
+                            let btn = egui::Button::new(
+                                egui::RichText::new("➔ Align to features")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(45, 110, 190));
+
+                            if ui
+                                .add(btn)
+                                .on_hover_text("Align scan coordinates based on assigned features")
+                                .clicked()
+                            {
+                                actions.push(BrowserAction::AlignToFeatures);
+                            }
+                        });
                     }
 
                     if !app.planes.is_empty() || !app.circles.is_empty() {
@@ -624,6 +768,15 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
             }
             BrowserAction::ExportAllReferences => {
                 app.export_all_references();
+            }
+            BrowserAction::AlignToFeatures => {
+                app.align_to_features();
+            }
+            BrowserAction::ToggleAssign(feat, axis) => {
+                app.toggle_assign_feature(feat, axis);
+            }
+            BrowserAction::ToggleOrigin(feat) => {
+                app.toggle_origin_feature(feat);
             }
         }
     }

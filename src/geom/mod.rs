@@ -1,3 +1,4 @@
+pub mod alignment;
 pub mod boundary;
 pub mod bvh;
 pub mod distance;

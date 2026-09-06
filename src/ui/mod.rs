@@ -1,4 +1,5 @@
 pub mod accordion;
+pub mod alignment;
 pub mod object_browser;
 pub mod sections;
 pub mod selection_hud;
@@ -18,6 +19,12 @@ pub enum ToolSection {
 
 /// Renders the complete left panel with the accordion sections.
 pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
+    // Fixed Brush Selection tool permanently visible above accordions
+    sections::render_brush_selection(app, ui);
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         // Section 1: Decimation
         let dec_badge = if app.preview.is_some() {
@@ -89,7 +96,12 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
             None
         };
         let coord_open = app.active_section == Some(ToolSection::Coordinates);
-        if accordion_header(ui, "Coordinate system", coord_open, coord_badge_str.as_deref()) {
+        if accordion_header(
+            ui,
+            "Coordinate system",
+            coord_open,
+            coord_badge_str.as_deref(),
+        ) {
             app.active_section = if coord_open {
                 None
             } else {

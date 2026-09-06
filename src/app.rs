@@ -2,7 +2,7 @@ use crate::camera::{Camera, ViewDir};
 use crate::geom::bvh::Bvh;
 use crate::geom::distance::Deviation;
 use crate::geom::fitting::{
-    fit_circle, fit_plane, plane_basis, CircleFit, FittedCircle, FittedPlane, PlaneFit,
+    CircleFit, FittedCircle, FittedPlane, PlaneFit, fit_circle, fit_plane, plane_basis,
 };
 use crate::geom::symmetry::SymPlane;
 use crate::io;
@@ -127,6 +127,7 @@ pub struct App {
     pub(crate) wheel_accum: f32,
     pub(crate) suppress_sel_drag: bool,
     pub(crate) active_section: Option<crate::ui::ToolSection>,
+    pub(crate) align_slots: crate::geom::alignment::AlignmentSlots,
 }
 
 impl App {
@@ -198,6 +199,7 @@ impl App {
             wheel_accum: 0.0,
             suppress_sel_drag: false,
             active_section: Some(crate::ui::ToolSection::Decimation),
+            align_slots: crate::geom::alignment::AlignmentSlots::default(),
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -423,9 +425,12 @@ impl App {
 
     pub(crate) fn schedule_decimate(&mut self) {
         if let Some(m) = self.orig_mesh().cloned() {
-            let id = self
-                .worker
-                .submit_decimate(m, self.dec_ratio, self.dec_error_mm, self.dec_lock_border);
+            let id = self.worker.submit_decimate(
+                m,
+                self.dec_ratio,
+                self.dec_error_mm,
+                self.dec_lock_border,
+            );
             self.dec_job = Some(id);
             self.status = "Simplifying preview…".to_string();
         }
@@ -456,10 +461,9 @@ impl App {
                     if self.dec_job == Some(id) {
                         self.set_preview(mesh, error);
                         self.dec_job = None;
-                        if let (Some(orig), Some(prev)) = (
-                            self.orig_mesh().cloned(),
-                            self.preview.clone(),
-                        ) {
+                        if let (Some(orig), Some(prev)) =
+                            (self.orig_mesh().cloned(), self.preview.clone())
+                        {
                             self.dev_job = Some(self.worker.submit_deviation(orig, prev));
                         }
                     }
@@ -589,7 +593,11 @@ impl App {
     }
 
     pub(crate) fn rotate_normal_to_axis(&mut self, axis: Vec3) {
-        if let Some(n) = self.sym.map(|s| s.plane.normal).or(self.plane.map(|p| p.normal)) {
+        if let Some(n) = self
+            .sym
+            .map(|s| s.plane.normal)
+            .or(self.plane.map(|p| p.normal))
+        {
             let q = rotation_between(n, axis);
             self.apply_transform(q, Vec3::ZERO);
             self.status = format!("Aligned normal to {}.", axis_name(axis));
@@ -616,8 +624,8 @@ impl App {
         if let Some(s) = self.sym {
             let d = s.plane.point.dot(s.plane.normal);
             self.apply_transform(Quat::IDENTITY, -s.plane.normal * d);
-            self.status = "Mesh translated so the symmetry plane passes through the origin."
-                .to_string();
+            self.status =
+                "Mesh translated so the symmetry plane passes through the origin.".to_string();
         }
     }
 
@@ -733,6 +741,19 @@ impl App {
             self.selected_plane_id = self.planes.last().map(|p| p.id);
             self.plane = self.planes.last().map(|p| p.fit);
         }
+        if self.align_slots.x == Some(crate::geom::alignment::FeatureRef::Plane(id)) {
+            self.align_slots.x = None;
+        }
+        if self.align_slots.y == Some(crate::geom::alignment::FeatureRef::Plane(id)) {
+            self.align_slots.y = None;
+        }
+        if self.align_slots.z == Some(crate::geom::alignment::FeatureRef::Plane(id)) {
+            self.align_slots.z = None;
+        }
+        if matches!(self.align_slots.origin, crate::geom::alignment::OriginRef::Plane(pid) if pid == id)
+        {
+            self.align_slots.origin = crate::geom::alignment::OriginRef::FromAssignedFeatures;
+        }
         self.status = "Plane deleted.".to_string();
     }
 
@@ -768,6 +789,19 @@ impl App {
         if self.selected_circle_id == Some(id) {
             self.selected_circle_id = self.circles.last().map(|c| c.id);
             self.circle = self.circles.last().map(|c| c.fit);
+        }
+        if self.align_slots.x == Some(crate::geom::alignment::FeatureRef::Circle(id)) {
+            self.align_slots.x = None;
+        }
+        if self.align_slots.y == Some(crate::geom::alignment::FeatureRef::Circle(id)) {
+            self.align_slots.y = None;
+        }
+        if self.align_slots.z == Some(crate::geom::alignment::FeatureRef::Circle(id)) {
+            self.align_slots.z = None;
+        }
+        if matches!(self.align_slots.origin, crate::geom::alignment::OriginRef::CircleCenter(cid) if cid == id)
+        {
+            self.align_slots.origin = crate::geom::alignment::OriginRef::FromAssignedFeatures;
         }
         self.status = "Circle deleted.".to_string();
     }
@@ -816,6 +850,157 @@ impl App {
         }
     }
 
+    pub(crate) fn feature_name(&self, feat: crate::geom::alignment::FeatureRef) -> String {
+        <Self as crate::geom::alignment::AlignmentGeometrySource>::get_feature_name(self, feat)
+    }
+
+    pub(crate) fn feature_assigned_axis(
+        &self,
+        feat: crate::geom::alignment::FeatureRef,
+    ) -> Option<crate::geom::alignment::AxisChoice> {
+        if self.align_slots.x == Some(feat) {
+            Some(crate::geom::alignment::AxisChoice::X)
+        } else if self.align_slots.y == Some(feat) {
+            Some(crate::geom::alignment::AxisChoice::Y)
+        } else if self.align_slots.z == Some(feat) {
+            Some(crate::geom::alignment::AxisChoice::Z)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn is_feature_origin(&self, feat: crate::geom::alignment::FeatureRef) -> bool {
+        match (feat, self.align_slots.origin) {
+            (
+                crate::geom::alignment::FeatureRef::SymmetryPlane,
+                crate::geom::alignment::OriginRef::SymmetryPlane,
+            ) => true,
+            (
+                crate::geom::alignment::FeatureRef::Plane(id),
+                crate::geom::alignment::OriginRef::Plane(oid),
+            ) => id == oid,
+            (
+                crate::geom::alignment::FeatureRef::Circle(id),
+                crate::geom::alignment::OriginRef::CircleCenter(oid),
+            ) => id == oid,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn toggle_assign_feature(
+        &mut self,
+        feat: crate::geom::alignment::FeatureRef,
+        axis: crate::geom::alignment::AxisChoice,
+    ) {
+        let is_current = match axis {
+            crate::geom::alignment::AxisChoice::X => self.align_slots.x == Some(feat),
+            crate::geom::alignment::AxisChoice::Y => self.align_slots.y == Some(feat),
+            crate::geom::alignment::AxisChoice::Z => self.align_slots.z == Some(feat),
+        };
+
+        // Remove this feature from any other slots first
+        if self.align_slots.x == Some(feat) {
+            self.align_slots.x = None;
+        }
+        if self.align_slots.y == Some(feat) {
+            self.align_slots.y = None;
+        }
+        if self.align_slots.z == Some(feat) {
+            self.align_slots.z = None;
+        }
+
+        if !is_current {
+            match axis {
+                crate::geom::alignment::AxisChoice::X => self.align_slots.x = Some(feat),
+                crate::geom::alignment::AxisChoice::Y => self.align_slots.y = Some(feat),
+                crate::geom::alignment::AxisChoice::Z => self.align_slots.z = Some(feat),
+            }
+        }
+    }
+
+    pub(crate) fn toggle_origin_feature(&mut self, feat: crate::geom::alignment::FeatureRef) {
+        if self.is_feature_origin(feat) {
+            self.align_slots.origin = crate::geom::alignment::OriginRef::FromAssignedFeatures;
+        } else {
+            self.align_slots.origin = match feat {
+                crate::geom::alignment::FeatureRef::SymmetryPlane => {
+                    crate::geom::alignment::OriginRef::SymmetryPlane
+                }
+                crate::geom::alignment::FeatureRef::Plane(id) => {
+                    crate::geom::alignment::OriginRef::Plane(id)
+                }
+                crate::geom::alignment::FeatureRef::Circle(id) => {
+                    crate::geom::alignment::OriginRef::CircleCenter(id)
+                }
+            };
+        }
+    }
+
+    pub(crate) fn clear_alignment_slots(&mut self) {
+        self.align_slots = crate::geom::alignment::AlignmentSlots::default();
+        self.status = "Cleared feature alignment slots.".to_string();
+    }
+
+    pub(crate) fn align_to_features(&mut self) -> bool {
+        match crate::geom::alignment::compute_alignment(&self.align_slots, self) {
+            Ok(t) => {
+                self.apply_transform(t.rotation, t.translation);
+                self.status = t.summary;
+                true
+            }
+            Err(e) => {
+                self.status = format!("Alignment failed: {e}");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn auto_assign_alignment_from_selection(&mut self) {
+        let mut assigned_any = false;
+
+        if self.sym.is_some() && self.align_slots.x.is_none() {
+            self.align_slots.x = Some(crate::geom::alignment::FeatureRef::SymmetryPlane);
+            assigned_any = true;
+        }
+
+        // Circle: prefer selected_circle_id, or first circle
+        let target_circle = self
+            .selected_circle_id
+            .or_else(|| self.circles.first().map(|c| c.id));
+        if let Some(cid) = target_circle {
+            if self.align_slots.z.is_none() {
+                self.align_slots.z = Some(crate::geom::alignment::FeatureRef::Circle(cid));
+                assigned_any = true;
+            }
+            if matches!(
+                self.align_slots.origin,
+                crate::geom::alignment::OriginRef::FromAssignedFeatures
+            ) {
+                self.align_slots.origin = crate::geom::alignment::OriginRef::CircleCenter(cid);
+            }
+        }
+
+        // Plane: prefer selected_plane_id, or first plane
+        let target_plane = self
+            .selected_plane_id
+            .or_else(|| self.planes.first().map(|p| p.id));
+        if let Some(pid) = target_plane {
+            if self.align_slots.y.is_none() {
+                self.align_slots.y = Some(crate::geom::alignment::FeatureRef::Plane(pid));
+                assigned_any = true;
+            } else if self.align_slots.x.is_none() {
+                self.align_slots.x = Some(crate::geom::alignment::FeatureRef::Plane(pid));
+                assigned_any = true;
+            }
+        }
+
+        if assigned_any {
+            self.status = "Auto-assigned features to alignment slots.".to_string();
+        } else {
+            self.status = "No unassigned features available to auto-assign.".to_string();
+        }
+    }
+
     fn selection_points(&self) -> Option<Vec<[f32; 3]>> {
         let m = self.display()?;
         let sel = &*self.sel;
@@ -830,11 +1015,7 @@ impl App {
                 }
             }
         }
-        if pts.is_empty() {
-            None
-        } else {
-            Some(pts)
-        }
+        if pts.is_empty() { None } else { Some(pts) }
     }
 
     pub(crate) fn clear_selection(&mut self) {
@@ -958,11 +1139,7 @@ pub(crate) fn rotation_between(from: Vec3, to: Vec3) -> Quat {
         return Quat::IDENTITY;
     }
     if f.dot(t) < -0.999_999 {
-        let perp = if f.x.abs() < 0.9 {
-            Vec3::X
-        } else {
-            Vec3::Y
-        };
+        let perp = if f.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
         let axis = f.cross(perp).normalize_or_zero();
         return Quat::from_axis_angle(axis, std::f32::consts::PI);
     }
@@ -1034,18 +1211,8 @@ fn plane_grid_lines(p: Vec3, n: Vec3, half: f32, div: u32, c: [f32; 4]) -> Vec<L
     let mut l = Vec::new();
     for i in 0..=div {
         let f = -half + (2.0 * half) * (i as f32 / div as f32);
-        push_line(
-            &mut l,
-            p + u * f + v * (-half),
-            p + u * f + v * half,
-            c,
-        );
-        push_line(
-            &mut l,
-            p + u * (-half) + v * f,
-            p + u * half + v * f,
-            c,
-        );
+        push_line(&mut l, p + u * f + v * (-half), p + u * f + v * half, c);
+        push_line(&mut l, p + u * (-half) + v * f, p + u * half + v * f, c);
     }
     l
 }
@@ -1099,7 +1266,14 @@ impl App {
                     if app.display().is_some() {
                         if let Some(p) = rfd::FileDialog::new()
                             .add_filter(ext, &[ext])
-                            .set_file_name(app.file_path.as_ref().and_then(|p| p.file_stem()).and_then(|s| s.to_str()).map(|s| format!("{s}.{ext}")).unwrap_or(format!("mesh.{ext}")))
+                            .set_file_name(
+                                app.file_path
+                                    .as_ref()
+                                    .and_then(|p| p.file_stem())
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| format!("{s}.{ext}"))
+                                    .unwrap_or(format!("mesh.{ext}")),
+                            )
                             .save_file()
                         {
                             let m = app.display().unwrap().clone();
@@ -1175,8 +1349,7 @@ impl App {
 
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
-        let (alloc, response) =
-            ui.allocate_exact_size(rect.size(), egui::Sense::click_and_drag());
+        let (alloc, response) = ui.allocate_exact_size(rect.size(), egui::Sense::click_and_drag());
         let rect = alloc;
         let ppp = ui.ctx().pixels_per_point();
         let vp_w = (rect.width() * ppp).round().max(1.0) as u32;
@@ -1199,7 +1372,10 @@ impl App {
         // Navigation flags
         let rmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
         let mmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
-        let is_navigating = rmb_down || mmb_down || response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle);
+        let is_navigating = rmb_down
+            || mmb_down
+            || response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle);
 
         // Navigation: MMB drag = Pan
         if response.dragged_by(egui::PointerButton::Middle) {
@@ -1277,10 +1453,16 @@ impl App {
         }
 
         // Keyboard shortcuts for grow/shrink as in Meshmixer (Period/Plus to grow, Comma/Minus to shrink)
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::Plus)) {
+        if ui
+            .ctx()
+            .input(|i| i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::Plus))
+        {
             self.grow_selection();
         }
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::Minus)) {
+        if ui
+            .ctx()
+            .input(|i| i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::Minus))
+        {
             self.shrink_selection();
         }
 
@@ -1297,7 +1479,8 @@ impl App {
 
         if self.mode != Mode::SymPickLine && !is_navigating && !self.suppress_sel_drag {
             if response.drag_started_by(egui::PointerButton::Primary)
-                || (response.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+                || (response.hovered()
+                    && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
             {
                 self.push_snapshot();
             }
@@ -1308,9 +1491,14 @@ impl App {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let sx = pos.x - rect.min.x;
                             let sy = pos.y - rect.min.y;
-                            if let Some(hit) =
-                                pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                            {
+                            if let Some(hit) = pick::ray_pick(
+                                &bvh,
+                                &self.camera,
+                                sx,
+                                sy,
+                                rect.width(),
+                                rect.height(),
+                            ) {
                                 let mut sel = self.sel.clone();
                                 let sel_slice: &mut Vec<u8> = Arc::make_mut(&mut sel);
                                 pick::brush(
@@ -1346,8 +1534,17 @@ impl App {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
                 if let (Some(mesh), Some(bvh)) = (self.display().cloned(), self.ensure_bvh()) {
-                    if let Some(hit) = pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height()) {
-                        let (r, tris) = pick::query_brush_triangles(&mesh, &bvh, &self.camera, &hit, self.brush_radius, rect.height());
+                    if let Some(hit) =
+                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
+                    {
+                        let (r, tris) = pick::query_brush_triangles(
+                            &mesh,
+                            &bvh,
+                            &self.camera,
+                            &hit,
+                            self.brush_radius,
+                            rect.height(),
+                        );
                         new_hover_hit = Some(hit);
                         new_hover_tris = tris;
                         new_hover_r = r;
@@ -1388,15 +1585,9 @@ impl App {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
                 if let Some(bvh) = self.ensure_bvh() {
-                    hover_pos_3d = pick::ray_pick(
-                        &bvh,
-                        &self.camera,
-                        sx,
-                        sy,
-                        rect.width(),
-                        rect.height(),
-                    )
-                    .map(|h| h.pos);
+                    hover_pos_3d =
+                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
+                            .map(|h| h.pos);
                 }
             }
         }
@@ -1436,8 +1627,7 @@ impl App {
                         egui::Color32::from_rgba_unmultiplied(255, 150, 40, 20),
                     )
                 };
-                ui.painter()
-                    .circle_filled(pos, self.brush_radius, fill_col);
+                ui.painter().circle_filled(pos, self.brush_radius, fill_col);
                 ui.painter().circle_stroke(
                     pos,
                     self.brush_radius,
@@ -1501,7 +1691,13 @@ impl App {
                 if let Some(p) = &self.plane {
                     if self.show_plane {
                         let half = diag * 0.35;
-                        depth_lines.extend(plane_grid_lines(p.point, p.normal, half, 6, [1.0, 0.6, 0.1, 0.9]));
+                        depth_lines.extend(plane_grid_lines(
+                            p.point,
+                            p.normal,
+                            half,
+                            6,
+                            [1.0, 0.6, 0.1, 0.9],
+                        ));
                         fills.extend(plane_fill(p.point, p.normal, half, [1.0, 0.6, 0.1, 0.12]));
                     }
                 }
@@ -1519,15 +1715,24 @@ impl App {
             if self.circles.is_empty() {
                 if let Some(c) = &self.circle {
                     if self.show_circle {
-                        depth_lines.extend(circle_lines(c.center, c.normal, c.radius, [1.0, 0.2, 0.8, 1.0]));
+                        depth_lines.extend(circle_lines(
+                            c.center,
+                            c.normal,
+                            c.radius,
+                            [1.0, 0.2, 0.8, 1.0],
+                        ));
                     }
                 }
             }
             if self.mode == Mode::SymPickLine {
                 if let Some(h) = hover_pos_3d {
                     overlay_lines.extend(marker_lines(h, diag * 0.02, [0.2, 0.9, 1.0, 1.0]));
-                    overlay_lines
-                        .extend(circle_lines(h, self.camera.back(), diag * 0.008, [0.2, 0.9, 1.0, 1.0]));
+                    overlay_lines.extend(circle_lines(
+                        h,
+                        self.camera.back(),
+                        diag * 0.008,
+                        [0.2, 0.9, 1.0, 1.0],
+                    ));
                     if let Some(&a) = self.sym_pick.first() {
                         push_line(&mut overlay_lines, a, h, [1.0, 1.0, 0.3, 1.0]);
                     }
@@ -1535,8 +1740,12 @@ impl App {
             }
             for &p in &self.sym_pick {
                 overlay_lines.extend(marker_lines(p, diag * 0.02, [1.0, 1.0, 1.0, 1.0]));
-                overlay_lines
-                    .extend(circle_lines(p, self.camera.back(), diag * 0.008, [1.0, 1.0, 1.0, 1.0]));
+                overlay_lines.extend(circle_lines(
+                    p,
+                    self.camera.back(),
+                    diag * 0.008,
+                    [1.0, 1.0, 1.0, 1.0],
+                ));
             }
             if self.sym_pick.len() == 2 {
                 push_line(
@@ -1603,8 +1812,8 @@ impl App {
                 if self.wire_dirty && self.show_wireframe {
                     if let Some(m) = self.display() {
                         if !gpu.upload_wireframe(m, 800_000) {
-                            self.status =
-                                "Wireframe disabled: mesh too dense (> 800k triangles).".to_string();
+                            self.status = "Wireframe disabled: mesh too dense (> 800k triangles)."
+                                .to_string();
                         }
                         self.wire_dirty = false;
                     }
@@ -1715,5 +1924,50 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             self.viewport(ui);
         });
+    }
+}
+
+impl crate::geom::alignment::AlignmentGeometrySource for App {
+    fn get_feature_direction_and_point(
+        &self,
+        feat: crate::geom::alignment::FeatureRef,
+    ) -> Option<(Vec3, Vec3)> {
+        match feat {
+            crate::geom::alignment::FeatureRef::SymmetryPlane => {
+                self.sym.map(|s| (s.plane.normal, s.plane.point))
+            }
+            crate::geom::alignment::FeatureRef::Plane(id) => self
+                .planes
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| (p.fit.normal, p.fit.point)),
+            crate::geom::alignment::FeatureRef::Circle(id) => self
+                .circles
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| (c.fit.normal, c.fit.center)),
+        }
+    }
+
+    fn get_feature_name(&self, feat: crate::geom::alignment::FeatureRef) -> String {
+        match feat {
+            crate::geom::alignment::FeatureRef::SymmetryPlane => "Symmetry plane".to_string(),
+            crate::geom::alignment::FeatureRef::Plane(id) => self
+                .planes
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| format!("Plane {id}")),
+            crate::geom::alignment::FeatureRef::Circle(id) => self
+                .circles
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| format!("Circle {id}")),
+        }
+    }
+
+    fn get_bbox_center(&self) -> Vec3 {
+        self.bbox.center()
     }
 }
