@@ -16,8 +16,6 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Orbit,
-    BrushAdd,
-    BrushErase,
     SymPickLine,
 }
 
@@ -340,9 +338,6 @@ impl App {
 
     fn maintain_bvh(&mut self) {
         if self.bvh.is_some() || self.bvh_job.is_some() {
-            return;
-        }
-        if self.mode == Mode::Orbit {
             return;
         }
         if let Some(m) = self.display().cloned() {
@@ -976,8 +971,7 @@ impl App {
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let hint: String = match self.mode {
-                Mode::Orbit | Mode::BrushAdd => "LMB drag = select · Shift+LMB = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
-                Mode::BrushErase => "LMB drag = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
+                Mode::Orbit => "LMB drag = select · Shift+LMB = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
                 Mode::SymPickLine => {
                     if self.sym_pick.len() >= 2 {
                         "Symmetry line ready · Click 'Calculate' in Symmetry panel to compute · Esc = reset"
@@ -1106,7 +1100,7 @@ impl App {
         }
 
         // Selection Tool: LMB drag = Select, Shift + LMB = Erase
-        let shift = ui.ctx().input(|i| i.modifiers.shift) || self.mode == Mode::BrushErase;
+        let shift = ui.ctx().input(|i| i.modifiers.shift);
         let is_add = !shift;
 
         let lmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
