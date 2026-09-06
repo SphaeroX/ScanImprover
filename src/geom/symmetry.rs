@@ -331,12 +331,16 @@ pub fn detect_symmetry_from_line(
         final_n = -final_n;
     }
 
-    let final_plane = SymPlane {
+    let initial_plane = SymPlane {
         normal: final_n,
         point: final_pt,
     };
-    let rms = compute_sym_rms(bvh, &fine, &final_plane, mask, c_fine);
-    Some((final_plane, rms))
+    let (mut refined_plane, refined_rms) =
+        refine_symmetry_masked(mesh, bvh, &initial_plane, mask);
+    if refined_plane.normal.dot(e1) < 0.0 {
+        refined_plane.normal = -refined_plane.normal;
+    }
+    Some((refined_plane, refined_rms))
 }
 
 /// Refines an existing symmetry plane candidate using robust loss and an optional exclusion mask.

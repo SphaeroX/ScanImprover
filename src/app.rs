@@ -591,7 +591,7 @@ impl App {
                 mask,
                 self.sym_exclude_holes,
             ));
-            self.status = "Calculating symmetry plane from line…".to_string();
+            self.status = "Calculating and optimizing symmetry plane from line…".to_string();
         }
     }
 
