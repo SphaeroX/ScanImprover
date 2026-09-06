@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod decimate;
+mod export;
 mod geom;
 mod io;
 mod mesh;

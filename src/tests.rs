@@ -567,5 +567,65 @@ mod tests {
         assert!(app.sel_count > 0);
         assert_eq!(app.active_section, Some(ToolSection::Selection));
     }
+
+    #[test]
+    fn export_step_and_script_and_dxf() {
+        use crate::export::{dxf, fusion_script, step};
+        use crate::geom::fitting::{CircleFit, FittedCircle, FittedPlane, PlaneFit};
+
+        let plane = FittedPlane {
+            id: 1,
+            name: "Top Plane".to_string(),
+            fit: PlaneFit {
+                point: Vec3::new(10.0, 20.0, 30.0),
+                normal: Vec3::Z,
+                rms: 0.001,
+                max_dev: 0.002,
+            },
+            visible: true,
+            color: [1.0, 0.5, 0.2, 1.0],
+        };
+
+        let circle = FittedCircle {
+            id: 2,
+            name: "Borehole 1".to_string(),
+            fit: CircleFit {
+                center: Vec3::new(10.0, 20.0, 30.0),
+                normal: Vec3::Z,
+                radius: 15.0,
+                plane_rms: 0.001,
+                radial_rms: 0.002,
+                radial_max: 0.003,
+            },
+            visible: true,
+            color: [0.2, 0.8, 0.3, 1.0],
+        };
+
+        // 1. STEP Export Test
+        let step_content = step::generate_step(&[&plane], &[&circle], 100.0);
+        assert!(step_content.contains("ISO-10303-21;"));
+        assert!(step_content.contains("ADVANCED_FACE('Top Plane'"));
+        assert!(step_content.contains("ADVANCED_FACE('Borehole 1'"));
+        assert!(step_content.contains("CIRCLE('"));
+        assert!(step_content.contains("OPEN_SHELL('"));
+        assert!(step_content.contains("END-ISO-10303-21;"));
+
+        // 2. Fusion Script Test
+        let py_content = fusion_script::generate_fusion_script(&[&plane], &[&circle]);
+        assert!(py_content.contains("import adsk.core"));
+        assert!(py_content.contains("import adsk.fusion"));
+        assert!(py_content.contains("plane_feat.name = \"Top Plane\""));
+        assert!(py_content.contains("sketch.name = \"Borehole 1\""));
+        assert!(py_content.contains("sketchCurves.sketchCircles.addByCenterRadius"));
+        // Check mm -> cm conversion (10mm -> 1.000000 cm)
+        assert!(py_content.contains("1.000000"));
+
+        // 3. DXF Test
+        let dxf_content = dxf::generate_dxf(&[&plane], &[&circle], 100.0);
+        assert!(dxf_content.contains("3DFACE"));
+        assert!(dxf_content.contains("CIRCLE"));
+        assert!(dxf_content.contains("POINT"));
+        assert!(dxf_content.contains("EOF"));
+    }
 }
 

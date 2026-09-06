@@ -789,6 +789,33 @@ impl App {
         }
     }
 
+    pub(crate) fn export_plane_id(&mut self, plane_id: u64) {
+        if let Some(p) = self.planes.iter().find(|p| p.id == plane_id) {
+            let size = (self.bbox.diagonal() * 0.4).clamp(20.0, 500.0);
+            match crate::export::export_plane_dialog(p, size) {
+                Ok(msg) => self.status = msg,
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn export_circle_id(&mut self, circle_id: u64) {
+        if let Some(c) = self.circles.iter().find(|c| c.id == circle_id) {
+            match crate::export::export_circle_dialog(c) {
+                Ok(msg) => self.status = msg,
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn export_all_references(&mut self) {
+        let size = (self.bbox.diagonal() * 0.4).clamp(20.0, 500.0);
+        match crate::export::export_all_references_dialog(&self.planes, &self.circles, size) {
+            Ok(msg) => self.status = msg,
+            Err(e) => self.status = format!("Export failed: {e}"),
+        }
+    }
+
     fn selection_points(&self) -> Option<Vec<[f32; 3]>> {
         let m = self.display()?;
         let sel = &*self.sel;

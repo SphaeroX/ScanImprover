@@ -17,6 +17,9 @@ enum BrowserAction {
     FitPlane,
     FitCircle,
     ToggleSymmetryVisibility,
+    ExportPlane(u64),
+    ExportCircle(u64),
+    ExportAllReferences,
 }
 
 /// Renders the Object Browser window on the right side of the 3D viewport.
@@ -313,6 +316,16 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                                         );
                                                     }
                                                 });
+                                                ui.add_space(2.0);
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .small_button("Export Plane…")
+                                                        .on_hover_text("Export this plane for Fusion 360 / CAD (STEP, Script, DXF)")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(BrowserAction::ExportPlane(p.id));
+                                                    }
+                                                });
                                             });
                                         });
                                     }
@@ -474,6 +487,16 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                                         );
                                                     }
                                                 });
+                                                ui.add_space(2.0);
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .small_button("Export Circle…")
+                                                        .on_hover_text("Export this circle for Fusion 360 / CAD (STEP, Script, DXF)")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(BrowserAction::ExportCircle(c.id));
+                                                    }
+                                                });
                                             });
                                         });
                                     }
@@ -513,6 +536,25 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                     );
                                 });
                             });
+                    }
+
+                    if !app.planes.is_empty() || !app.circles.is_empty() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.vertical_centered(|ui| {
+                            if ui
+                                .button(
+                                    egui::RichText::new("Export all references…")
+                                        .size(11.5)
+                                        .color(egui::Color32::from_rgb(140, 200, 255)),
+                                )
+                                .on_hover_text("Export all visible planes and circles into a single CAD file (STEP, Script, DXF)")
+                                .clicked()
+                            {
+                                actions.push(BrowserAction::ExportAllReferences);
+                            }
+                        });
                     }
                 });
         });
@@ -573,6 +615,15 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                 if let Some(sym) = &mut app.sym {
                     sym.show = !sym.show;
                 }
+            }
+            BrowserAction::ExportPlane(id) => {
+                app.export_plane_id(id);
+            }
+            BrowserAction::ExportCircle(id) => {
+                app.export_circle_id(id);
+            }
+            BrowserAction::ExportAllReferences => {
+                app.export_all_references();
             }
         }
     }

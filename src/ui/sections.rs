@@ -387,6 +387,16 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             if origin {
                 app.origin_on_plane();
             }
+            ui.add_space(2.0);
+            if ui
+                .button("Export plane…")
+                .on_hover_text("Export this plane for Fusion 360 / CAD (STEP, Script, DXF)")
+                .clicked()
+            {
+                if let Some(id) = app.selected_plane_id {
+                    app.export_plane_id(id);
+                }
+            }
         });
     }
 
@@ -443,6 +453,16 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             }
             if origin {
                 app.origin_at_circle_center();
+            }
+            ui.add_space(2.0);
+            if ui
+                .button("Export circle…")
+                .on_hover_text("Export this circle for Fusion 360 / CAD (STEP, Script, DXF)")
+                .clicked()
+            {
+                if let Some(id) = app.selected_circle_id {
+                    app.export_circle_id(id);
+                }
             }
         });
     }
