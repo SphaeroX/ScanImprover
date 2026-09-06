@@ -19,17 +19,17 @@ pub fn render_mode_header(app: &mut App, ui: &mut egui::Ui) {
     let (name, desc, accent) = match app.mode {
         Mode::Orbit => (
             "ORBIT",
-            "LMB drag = orbit · MMB = pan · wheel = zoom".to_string(),
+            "RMB drag = orbit · MMB = pan · LMB = select · Shift+LMB = erase".to_string(),
             (110, 140, 255),
         ),
         Mode::BrushAdd => (
             "SELECT",
-            "LMB drag = paint-select faces under the brush".to_string(),
+            "LMB drag = paint-select · Shift+LMB = erase · RMB = orbit · MMB = pan".to_string(),
             (255, 150, 40),
         ),
         Mode::BrushErase => (
             "ERASE",
-            "LMB drag = erase faces from the selection".to_string(),
+            "LMB drag = erase · RMB = orbit · MMB = pan · Ctrl+Wheel = grow/shrink".to_string(),
             (255, 70, 70),
         ),
         Mode::SymPickLine => (

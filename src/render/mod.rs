@@ -1,4 +1,4 @@
-﻿use crate::mesh::Mesh;
+use crate::mesh::Mesh;
 use glam::{Mat4, Vec3};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
@@ -59,8 +59,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (U.params.x > 0.5 && in.aux.y >= 0.0) {
         col = heat_color(clamp(in.aux.y * U.params.y, 0.0, 1.0));
     }
-    if (in.aux.x > 0.5) {
+    if (in.aux.x > 0.75) {
         col = mix(col, vec3<f32>(1.0, 0.45, 0.10), 0.55);
+    } else if (in.aux.x > 0.25) {
+        col = mix(col, vec3<f32>(1.0, 0.75, 0.15), 0.50);
+    } else if (in.aux.x < -0.25) {
+        col = mix(col, vec3<f32>(1.0, 0.20, 0.20), 0.55);
     }
     return vec4<f32>(col * diff + vec3<f32>(spec), 1.0);
 }

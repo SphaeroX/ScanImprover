@@ -430,7 +430,7 @@ mod tests {
         let (t, tri) = bvh.ray_cast(ro, rd, cam.far).expect("center ray should hit");
         let hit = pick::Hit { pos: ro + rd * t, tri };
         let mut sel = vec![0u8; m.triangle_count()];
-        pick::brush(&m, &cam, &hit, 40.0, 600.0, true, &mut sel);
+        pick::brush(&m, &bvh, &cam, &hit, 40.0, 600.0, true, &mut sel);
         assert!(
             sel.iter().filter(|&&v| v > 0).count() >= 1,
             "brush selected nothing"

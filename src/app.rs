@@ -92,6 +92,13 @@ pub struct App {
     pub(crate) mesh_dirty: bool,
     pub(crate) aux_dirty: bool,
     pub(crate) wire_dirty: bool,
+    pub(crate) expand_angle_deg: f32,
+    pub(crate) topology: Option<Arc<crate::geom::topology::MeshTopology>>,
+    pub(crate) hover_hit: Option<pick::Hit>,
+    pub(crate) hover_tris: Vec<u32>,
+    pub(crate) hover_radius_world: f32,
+    pub(crate) hover_is_erase: bool,
+    pub(crate) wheel_accum: f32,
     pub(crate) active_section: Option<crate::ui::ToolSection>,
 }
 
@@ -148,6 +155,13 @@ impl App {
             mesh_dirty: false,
             aux_dirty: false,
             wire_dirty: false,
+            expand_angle_deg: 45.0,
+            topology: None,
+            hover_hit: None,
+            hover_tris: Vec::new(),
+            hover_radius_world: 0.0,
+            hover_is_erase: false,
+            wheel_accum: 0.0,
             active_section: Some(crate::ui::ToolSection::Decimation),
         };
         if let Some(arg) = std::env::args().nth(1) {
@@ -195,6 +209,9 @@ impl App {
             self.deviation = None;
             self.heat = None;
             self.bvh = None;
+            self.topology = None;
+            self.hover_hit = None;
+            self.hover_tris.clear();
             self.mesh_dirty = true;
             self.aux_dirty = true;
             self.recount_sel();
@@ -229,6 +246,9 @@ impl App {
                     self.sel = Arc::new(vec![0u8; tris]);
                     self.sel_count = 0;
                     self.bvh = None;
+                    self.topology = None;
+                    self.hover_hit = None;
+                    self.hover_tris.clear();
                     self.deviation = None;
                     self.heat = None;
                     self.sym = None;
@@ -290,6 +310,9 @@ impl App {
             *p = rot * *p + trans;
         }
         self.bvh = None;
+        self.topology = None;
+        self.hover_hit = None;
+        self.hover_tris.clear();
         self.mesh_dirty = true;
         self.aux_dirty = true;
         self.wire_dirty = true;
@@ -336,6 +359,9 @@ impl App {
         self.sel = Arc::new(Vec::new());
         self.sel_count = 0;
         self.bvh = None;
+        self.topology = None;
+        self.hover_hit = None;
+        self.hover_tris.clear();
         self.mesh_dirty = true;
         self.aux_dirty = true;
         self.wire_dirty = true;
@@ -643,6 +669,48 @@ impl App {
         }
     }
 
+    pub(crate) fn ensure_topology(&mut self) -> Option<Arc<crate::geom::topology::MeshTopology>> {
+        if let Some(t) = &self.topology {
+            return Some(t.clone());
+        }
+        let m = self.display()?.clone();
+        let topo = Arc::new(crate::geom::topology::MeshTopology::build(&m));
+        self.topology = Some(topo.clone());
+        Some(topo)
+    }
+
+    pub(crate) fn grow_selection(&mut self) {
+        if self.sel_count == 0 {
+            return;
+        }
+        if let Some(topo) = self.ensure_topology() {
+            self.push_snapshot();
+            let angle_rad = self.expand_angle_deg.to_radians();
+            let new_sel = crate::geom::topology::grow_selection(&topo, &self.sel, angle_rad);
+            self.sel = Arc::new(new_sel);
+            self.recount_sel();
+            self.aux_dirty = true;
+            self.status = format!(
+                "Selection expanded (crease threshold: {:.1}°): {} faces",
+                self.expand_angle_deg, self.sel_count
+            );
+        }
+    }
+
+    pub(crate) fn shrink_selection(&mut self) {
+        if self.sel_count == 0 {
+            return;
+        }
+        if let Some(topo) = self.ensure_topology() {
+            self.push_snapshot();
+            let new_sel = crate::geom::topology::shrink_selection(&topo, &self.sel);
+            self.sel = Arc::new(new_sel);
+            self.recount_sel();
+            self.aux_dirty = true;
+            self.status = format!("Selection shrunk: {} faces", self.sel_count);
+        }
+    }
+
     pub(crate) fn apply_preview(&mut self) {
         if let Some(p) = self.preview.clone() {
             self.push_snapshot();
@@ -654,6 +722,9 @@ impl App {
             self.sel = Arc::new(vec![0u8; self.current.as_ref().unwrap().triangle_count()]);
             self.sel_count = 0;
             self.bvh = None;
+            self.topology = None;
+            self.hover_hit = None;
+            self.hover_tris.clear();
             self.mesh_dirty = true;
             self.aux_dirty = true;
             self.wire_dirty = true;
@@ -668,6 +739,9 @@ impl App {
         self.sel = Arc::new(Vec::new());
         self.sel_count = 0;
         self.bvh = None;
+        self.topology = None;
+        self.hover_hit = None;
+        self.hover_tris.clear();
         self.mesh_dirty = true;
         self.aux_dirty = true;
         self.wire_dirty = true;
@@ -684,6 +758,9 @@ impl App {
             self.sel = Arc::new(vec![0u8; tris]);
             self.sel_count = 0;
             self.bvh = None;
+            self.topology = None;
+            self.hover_hit = None;
+            self.hover_tris.clear();
             self.deviation = None;
             self.heat = None;
             self.mesh_dirty = true;
@@ -899,9 +976,8 @@ impl App {
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let hint: String = match self.mode {
-                Mode::Orbit => "LMB drag = free orbit · MMB drag = pan · Wheel = zoom · 1/2/3/4 = views".to_string(),
-                Mode::BrushAdd => "LMB drag over mesh to paint-select front faces".to_string(),
-                Mode::BrushErase => "LMB drag to erase selection".to_string(),
+                Mode::Orbit | Mode::BrushAdd => "LMB drag = select · Shift+LMB = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
+                Mode::BrushErase => "LMB drag = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
                 Mode::SymPickLine => {
                     if self.sym_pick.len() >= 2 {
                         "Symmetry line ready · Click 'Calculate' in Symmetry panel to compute · Esc = reset"
@@ -940,52 +1016,111 @@ impl App {
             self.sym_pick.clear();
         }
 
+        // Navigation: MMB drag = Pan
         if response.dragged_by(egui::PointerButton::Middle) {
             let d = response.drag_delta();
             self.camera.pan_drag(d.x, d.y, rect.height());
         }
-        if response.dragged_by(egui::PointerButton::Primary) {
-            if self.mode == Mode::Orbit {
-                let d = response.drag_delta();
-                self.camera.rotate(d.x, d.y);
-            }
+
+        // Navigation: RMB drag = Rotate / Orbit (Meshmixer style)
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let d = response.drag_delta();
+            self.camera.rotate(d.x, d.y);
         }
+
+        // Mouse Wheel: Ctrl + Wheel = Grow / Shrink selection (Meshmixer style), Wheel = Zoom
         if response.hovered() {
+            let ctrl = ui.ctx().input(|i| i.modifiers.ctrl);
             let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom(0.95f32.powf(scroll / 60.0));
+            if ctrl {
+                if scroll != 0.0 {
+                    self.wheel_accum += scroll;
+                    while self.wheel_accum >= 12.0 {
+                        self.grow_selection();
+                        self.wheel_accum -= 12.0;
+                    }
+                    while self.wheel_accum <= -12.0 {
+                        self.shrink_selection();
+                        self.wheel_accum += 12.0;
+                    }
+                }
+            } else {
+                self.wheel_accum = 0.0;
+                if scroll != 0.0 {
+                    self.camera.zoom(0.95f32.powf(scroll / 60.0));
+                }
             }
         }
 
-        if (self.mode == Mode::BrushAdd || self.mode == Mode::BrushErase)
-            && (response.dragged_by(egui::PointerButton::Primary) || response.is_pointer_button_down_on())
-        {
-            if let Some(mesh) = self.display().cloned() {
-                if let Some(bvh) = self.ensure_bvh() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let sx = pos.x - rect.min.x;
-                        let sy = pos.y - rect.min.y;
-                        if let Some(hit) =
-                            pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                        {
-                            let mut sel = self.sel.clone();
-                            let sel_slice: &mut Vec<u8> = Arc::make_mut(&mut sel);
-                            pick::brush(
-                                &mesh,
-                                &self.camera,
-                                &hit,
-                                self.brush_radius,
-                                rect.height(),
-                                self.mode == Mode::BrushAdd,
-                                sel_slice,
-                            );
-                            self.sel = sel;
-                            self.recount_sel();
-                            self.aux_dirty = true;
+        // Selection Tool: LMB drag = Select, Shift + LMB = Erase
+        let shift = ui.ctx().input(|i| i.modifiers.shift) || self.mode == Mode::BrushErase;
+        let is_add = !shift;
+
+        if self.mode != Mode::SymPickLine {
+            if response.drag_started_by(egui::PointerButton::Primary)
+                || (response.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+            {
+                self.push_snapshot();
+            }
+
+            if response.dragged_by(egui::PointerButton::Primary) || response.is_pointer_button_down_on() {
+                if let Some(mesh) = self.display().cloned() {
+                    if let Some(bvh) = self.ensure_bvh() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let sx = pos.x - rect.min.x;
+                            let sy = pos.y - rect.min.y;
+                            if let Some(hit) =
+                                pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
+                            {
+                                let mut sel = self.sel.clone();
+                                let sel_slice: &mut Vec<u8> = Arc::make_mut(&mut sel);
+                                pick::brush(
+                                    &mesh,
+                                    &bvh,
+                                    &self.camera,
+                                    &hit,
+                                    self.brush_radius,
+                                    rect.height(),
+                                    is_add,
+                                    sel_slice,
+                                );
+                                self.sel = sel;
+                                self.recount_sel();
+                                self.aux_dirty = true;
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // Real-time hover preview computation
+        let mut new_hover_hit = None;
+        let mut new_hover_tris = Vec::new();
+        let mut new_hover_r = 0.0f32;
+
+        if self.mode != Mode::SymPickLine && response.hovered() {
+            if let Some(pos) = response.hover_pos() {
+                let sx = pos.x - rect.min.x;
+                let sy = pos.y - rect.min.y;
+                if let (Some(mesh), Some(bvh)) = (self.display().cloned(), self.ensure_bvh()) {
+                    if let Some(hit) = pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height()) {
+                        let (r, tris) = pick::query_brush_triangles(&mesh, &bvh, &self.camera, &hit, self.brush_radius, rect.height());
+                        new_hover_hit = Some(hit);
+                        new_hover_tris = tris;
+                        new_hover_r = r;
+                    }
+                }
+            }
+        }
+
+        let hover_changed = self.hover_tris != new_hover_tris || self.hover_is_erase != shift;
+        self.hover_hit = new_hover_hit;
+        self.hover_tris = new_hover_tris;
+        self.hover_radius_world = new_hover_r;
+        self.hover_is_erase = shift;
+        if hover_changed {
+            self.aux_dirty = true;
         }
 
         let k1 = ui.ctx().input(|i| i.key_pressed(egui::Key::Num1));
@@ -1055,17 +1190,17 @@ impl App {
             }
         }
 
-        if matches!(self.mode, Mode::BrushAdd | Mode::BrushErase) && response.hovered() {
+        if self.mode != Mode::SymPickLine && response.hovered() {
             if let Some(pos) = response.hover_pos() {
-                let (stroke_col, fill_col) = if self.mode == Mode::BrushAdd {
+                let (stroke_col, fill_col) = if self.hover_is_erase {
                     (
-                        egui::Color32::from_rgba_unmultiplied(255, 150, 40, 230),
-                        egui::Color32::from_rgba_unmultiplied(255, 150, 40, 24),
+                        egui::Color32::from_rgba_unmultiplied(255, 70, 70, 230),
+                        egui::Color32::from_rgba_unmultiplied(255, 70, 70, 20),
                     )
                 } else {
                     (
-                        egui::Color32::from_rgba_unmultiplied(255, 70, 70, 230),
-                        egui::Color32::from_rgba_unmultiplied(255, 70, 70, 24),
+                        egui::Color32::from_rgba_unmultiplied(255, 150, 40, 230),
+                        egui::Color32::from_rgba_unmultiplied(255, 150, 40, 20),
                     )
                 };
                 ui.painter()
@@ -1073,7 +1208,7 @@ impl App {
                 ui.painter().circle_stroke(
                     pos,
                     self.brush_radius,
-                    egui::Stroke::new(2.0, stroke_col),
+                    egui::Stroke::new(1.5, stroke_col),
                 );
             }
         }
@@ -1143,6 +1278,35 @@ impl App {
                     [1.0, 1.0, 0.3, 1.0],
                 );
             }
+            if let Some(hit) = &self.hover_hit {
+                if let Some(m) = self.display() {
+                    let r = self.hover_radius_world;
+                    if r > 0.0 && (hit.tri as usize) < m.triangle_count() {
+                        let i0 = m.indices[3 * hit.tri as usize] as usize;
+                        let i1 = m.indices[3 * hit.tri as usize + 1] as usize;
+                        let i2 = m.indices[3 * hit.tri as usize + 2] as usize;
+                        let a = Vec3::from(m.positions[i0]);
+                        let b = Vec3::from(m.positions[i1]);
+                        let c = Vec3::from(m.positions[i2]);
+                        let mut n = (b - a).cross(c - a);
+                        if n.length_squared() > 1e-12 {
+                            n = n.normalize();
+                        } else {
+                            n = self.camera.back();
+                        }
+                        if n.dot(self.camera.eye() - hit.pos) < 0.0 {
+                            n = -n;
+                        }
+                        let col = if self.hover_is_erase {
+                            [1.0, 0.25, 0.25, 0.95]
+                        } else {
+                            [1.0, 0.65, 0.15, 0.95]
+                        };
+                        let center = hit.pos + n * (r * 0.005);
+                        overlay_lines.extend(circle_lines(center, n, r, col));
+                    }
+                }
+            }
         }
 
         if self.display().is_none() {
@@ -1192,6 +1356,27 @@ impl App {
                                     for k in 0..3 {
                                         let v = m.indices[3 * t + k] as usize;
                                         aux[v][0] = 1.0;
+                                    }
+                                }
+                            }
+                            if !self.hover_tris.is_empty() {
+                                let is_erase = self.hover_is_erase;
+                                for &t in &self.hover_tris {
+                                    let t_usize = t as usize;
+                                    if t_usize < m.triangle_count() {
+                                        let is_sel = self.sel[t_usize] > 0;
+                                        for k in 0..3 {
+                                            let v = m.indices[3 * t_usize + k] as usize;
+                                            if is_erase {
+                                                if is_sel {
+                                                    aux[v][0] = -0.5;
+                                                }
+                                            } else {
+                                                if !is_sel {
+                                                    aux[v][0] = 0.5;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

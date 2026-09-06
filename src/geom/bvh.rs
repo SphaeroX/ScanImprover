@@ -184,6 +184,54 @@ impl Bvh {
             None
         }
     }
+
+    pub fn query_sphere(&self, center: Vec3, radius: f32, out: &mut Vec<u32>) {
+        if self.tris.is_empty() {
+            return;
+        }
+        let r2 = radius * radius;
+        let mut stack: [u32; 256] = [0; 256];
+        let mut sp = 0usize;
+        stack[sp] = 0;
+        sp += 1;
+        while sp > 0 {
+            sp -= 1;
+            let node = stack[sp];
+            let n = node as usize;
+            let d2 = point_aabb_dist_sq(
+                center,
+                &self.node_min[n],
+                &self.node_max[n],
+            );
+            if d2 > r2 {
+                continue;
+            }
+            let cnt = self.node_count[n];
+            if cnt > 0 {
+                let first = self.node_left[n] as usize;
+                for k in 0..cnt as usize {
+                    let t = self.tri_order[first + k];
+                    let [a, b, c] = self.tri_verts(t);
+                    if (a - center).length_squared() <= r2
+                        || (b - center).length_squared() <= r2
+                        || (c - center).length_squared() <= r2
+                        || closest_point_triangle(center, a, b, c).1 <= r2
+                    {
+                        out.push(t);
+                    }
+                }
+            } else {
+                let l = self.node_left[n];
+                let r = self.node_right[n];
+                if sp + 2 < stack.len() {
+                    stack[sp] = l;
+                    sp += 1;
+                    stack[sp] = r;
+                    sp += 1;
+                }
+            }
+        }
+    }
 }
 
 struct Builder<'a> {

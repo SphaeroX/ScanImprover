@@ -276,6 +276,26 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             egui::Slider::new(&mut app.brush_radius, 2.0..=150.0).text("Brush radius (px)"),
         );
         ui.add_space(2.0);
+        ui.add(
+            egui::Slider::new(&mut app.expand_angle_deg, 1.0..=180.0)
+                .text("Crease angle")
+                .suffix("°"),
+        );
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.button("Grow").clicked() {
+                app.grow_selection();
+            }
+            if ui.button("Shrink").clicked() {
+                app.shrink_selection();
+            }
+            ui.label(
+                egui::RichText::new("(Ctrl + Wheel)")
+                    .weak()
+                    .small(),
+            );
+        });
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
             if ui.button("Clear").clicked() {
                 app.clear_selection();
