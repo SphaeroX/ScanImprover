@@ -1037,25 +1037,72 @@ impl App {
         // Mouse Wheel: Ctrl + Wheel = Grow / Shrink selection (Meshmixer style), Wheel = Zoom
         if response.hovered() && !is_navigating {
             let ctrl = ui.ctx().input(|i| i.modifiers.ctrl);
-            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
             if ctrl {
-                if scroll != 0.0 {
-                    self.wheel_accum += scroll;
-                    while self.wheel_accum >= 12.0 {
-                        self.grow_selection();
-                        self.wheel_accum -= 12.0;
+                let mut wheel_events: Vec<(egui::MouseWheelUnit, egui::Vec2)> = Vec::new();
+                let mut zoom_delta = 1.0f32;
+                ui.ctx().input(|i| {
+                    zoom_delta = i.zoom_delta();
+                    for event in &i.events {
+                        if let egui::Event::MouseWheel { unit, delta, .. } = event {
+                            wheel_events.push((*unit, *delta));
+                        }
                     }
-                    while self.wheel_accum <= -12.0 {
+                });
+
+                let mut triggered = false;
+                for (unit, delta) in wheel_events {
+                    match unit {
+                        egui::MouseWheelUnit::Line => {
+                            let steps = delta.y.round() as i32;
+                            if steps > 0 {
+                                for _ in 0..steps {
+                                    self.grow_selection();
+                                }
+                                triggered = true;
+                            } else if steps < 0 {
+                                for _ in 0..(-steps) {
+                                    self.shrink_selection();
+                                }
+                                triggered = true;
+                            }
+                        }
+                        egui::MouseWheelUnit::Point | egui::MouseWheelUnit::Page => {
+                            self.wheel_accum += delta.y;
+                            while self.wheel_accum >= 10.0 {
+                                self.grow_selection();
+                                self.wheel_accum -= 10.0;
+                                triggered = true;
+                            }
+                            while self.wheel_accum <= -10.0 {
+                                self.shrink_selection();
+                                self.wheel_accum += 10.0;
+                                triggered = true;
+                            }
+                        }
+                    }
+                }
+                if !triggered {
+                    if zoom_delta > 1.01 {
+                        self.grow_selection();
+                    } else if zoom_delta < 0.99 {
                         self.shrink_selection();
-                        self.wheel_accum += 12.0;
                     }
                 }
             } else {
                 self.wheel_accum = 0.0;
+                let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
                 if scroll != 0.0 {
                     self.camera.zoom(0.95f32.powf(scroll / 60.0));
                 }
             }
+        }
+
+        // Keyboard shortcuts for grow/shrink as in Meshmixer (Period/Plus to grow, Comma/Minus to shrink)
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::Plus)) {
+            self.grow_selection();
+        }
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::Minus)) {
+            self.shrink_selection();
         }
 
         // Selection Tool: LMB drag = Select, Shift + LMB = Erase
