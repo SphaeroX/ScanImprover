@@ -125,6 +125,7 @@ pub struct App {
     pub(crate) hover_radius_world: f32,
     pub(crate) hover_is_erase: bool,
     pub(crate) wheel_accum: f32,
+    pub(crate) suppress_sel_drag: bool,
     pub(crate) active_section: Option<crate::ui::ToolSection>,
 }
 
@@ -195,6 +196,7 @@ impl App {
             hover_radius_world: 0.0,
             hover_is_erase: false,
             wheel_accum: 0.0,
+            suppress_sel_drag: false,
             active_section: Some(crate::ui::ToolSection::Decimation),
         };
         if let Some(arg) = std::env::args().nth(1) {
@@ -1262,7 +1264,11 @@ impl App {
         let lmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
         let lmb_drag = response.dragged_by(egui::PointerButton::Primary);
 
-        if self.mode != Mode::SymPickLine && !is_navigating {
+        if !lmb_down {
+            self.suppress_sel_drag = false;
+        }
+
+        if self.mode != Mode::SymPickLine && !is_navigating && !self.suppress_sel_drag {
             if response.drag_started_by(egui::PointerButton::Primary)
                 || (response.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
             {
@@ -1367,31 +1373,22 @@ impl App {
 
         if self.mode == Mode::SymPickLine
             && response.hovered()
-            && ui.input(|i| {
-                i.pointer.button_pressed(egui::PointerButton::Primary)
-                    || i.pointer.button_pressed(egui::PointerButton::Secondary)
-            })
+            && !is_navigating
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
         {
-            if let Some(bvh) = self.ensure_bvh() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let sx = pos.x - rect.min.x;
-                    let sy = pos.y - rect.min.y;
-                    if let Some(hit) =
-                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                    {
-                        if self.sym_pick.len() >= 2 {
-                            self.sym_pick.clear();
-                        }
-                        self.sym_pick.push(hit.pos);
-                        if self.sym_pick.len() == 1 {
-                            self.status = "Point 1 placed. Click point 2 on the mesh.".to_string();
-                        } else if self.sym_pick.len() == 2 {
-                            self.status =
-                                "Symmetry line drawn. Click 'Calculate' in Symmetry panel to compute."
-                                    .to_string();
-                            self.mode = Mode::Orbit;
-                        }
-                    }
+            self.suppress_sel_drag = true;
+            if let Some(pos) = hover_pos_3d {
+                if self.sym_pick.len() >= 2 {
+                    self.sym_pick.clear();
+                }
+                self.sym_pick.push(pos);
+                if self.sym_pick.len() == 1 {
+                    self.status = "Point 1 placed. Click point 2 on the mesh.".to_string();
+                } else if self.sym_pick.len() == 2 {
+                    self.status =
+                        "Symmetry line drawn. Click 'Calculate' in Symmetry panel to compute."
+                            .to_string();
+                    self.mode = Mode::Orbit;
                 }
             }
         }

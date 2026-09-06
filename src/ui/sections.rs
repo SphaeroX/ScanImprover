@@ -192,9 +192,11 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                     let a = app.sym_pick[0];
                     let b = app.sym_pick[1];
                     app.schedule_sym_from_line(a, b);
+                    app.mode = Mode::Orbit;
                 }
                 if ui.button("Clear line").clicked() {
                     app.sym_pick.clear();
+                    app.mode = Mode::Orbit;
                 }
             });
         } else if !app.sym_pick.is_empty() {
@@ -203,6 +205,7 @@ pub fn render_symmetry(app: &mut App, ui: &mut egui::Ui) {
                 ui.label("1 point placed…");
                 if ui.button("Clear line").clicked() {
                     app.sym_pick.clear();
+                    app.mode = Mode::Orbit;
                 }
             });
         }

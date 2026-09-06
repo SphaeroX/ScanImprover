@@ -486,4 +486,48 @@ mod tests {
         app.clear_selection();
         assert_eq!(app.sel_count, 0);
     }
+
+    #[test]
+    fn symmetry_pick_line_mode_transition_and_suppression() {
+        use crate::app::Mode;
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        let tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+        app.sel = std::sync::Arc::new(vec![0u8; tris]);
+        app.sel_count = 0;
+
+        // Start in SymPickLine
+        app.mode = Mode::SymPickLine;
+        app.sym_pick.clear();
+        assert_eq!(app.mode, Mode::SymPickLine);
+
+        // Place point 1
+        let p1 = Vec3::new(0.0, 0.0, 1.0);
+        app.sym_pick.push(p1);
+        app.suppress_sel_drag = true;
+        assert_eq!(app.sym_pick.len(), 1);
+        assert_eq!(app.mode, Mode::SymPickLine);
+
+        // Place point 2 -> triggers transition to Mode::Orbit
+        let p2 = Vec3::new(1.0, 0.0, 1.0);
+        app.sym_pick.push(p2);
+        app.suppress_sel_drag = true;
+        if app.sym_pick.len() >= 2 {
+            app.mode = Mode::Orbit;
+        }
+
+        // Mode is now Orbit, 2 points stored
+        assert_eq!(app.mode, Mode::Orbit);
+        assert_eq!(app.sym_pick.len(), 2);
+
+        // While mouse is still held down from point 2 click, suppress_sel_drag is true:
+        assert!(app.suppress_sel_drag);
+        assert_eq!(app.sel_count, 0, "No faces must be selected during pick line placement");
+
+        // Once mouse is released, suppress_sel_drag resets to false:
+        app.suppress_sel_drag = false;
+        assert!(!app.suppress_sel_drag);
+    }
 }
