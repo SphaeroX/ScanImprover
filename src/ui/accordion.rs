@@ -66,26 +66,35 @@ pub fn accordion_header(
     // Render content in a child UI scoped to rect with padding
     let content_rect = rect.shrink2(egui::vec2(10.0, 0.0));
     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+    child_ui.style_mut().interaction.selectable_labels = false;
     child_ui.horizontal_centered(|ui| {
         let arrow = if is_open { "▾" } else { "▸" };
-        ui.label(
-            egui::RichText::new(arrow)
-                .strong()
-                .size(14.0)
-                .color(if is_open {
-                    egui::Color32::from_rgb(120, 170, 255)
-                } else if is_hovered {
-                    egui::Color32::from_rgb(200, 210, 230)
-                } else {
-                    egui::Color32::from_rgb(150, 155, 165)
-                }),
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(arrow)
+                    .strong()
+                    .size(14.0)
+                    .color(if is_open {
+                        egui::Color32::from_rgb(120, 170, 255)
+                    } else if is_hovered {
+                        egui::Color32::from_rgb(200, 210, 230)
+                    } else {
+                        egui::Color32::from_rgb(150, 155, 165)
+                    }),
+            )
+            .selectable(false)
+            .sense(egui::Sense::empty()),
         );
         ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(title)
-                .strong()
-                .size(13.5)
-                .color(text_color),
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(title)
+                    .strong()
+                    .size(13.5)
+                    .color(text_color),
+            )
+            .selectable(false)
+            .sense(egui::Sense::empty()),
         );
 
         if let Some(b) = badge {
@@ -105,10 +114,14 @@ pub fn accordion_header(
                     .corner_radius(3.0)
                     .inner_margin(egui::Margin::symmetric(5, 2))
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(b)
-                                .size(10.5)
-                                .color(badge_fg),
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(b)
+                                    .size(10.5)
+                                    .color(badge_fg),
+                            )
+                            .selectable(false)
+                            .sense(egui::Sense::empty()),
                         );
                     });
             });
