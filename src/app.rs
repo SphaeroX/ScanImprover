@@ -1017,6 +1017,12 @@ impl App {
         }
 
         // Navigation: MMB drag = Pan
+        // Navigation flags
+        let rmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+        let mmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
+        let is_navigating = rmb_down || mmb_down || response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle);
+
+        // Navigation: MMB drag = Pan
         if response.dragged_by(egui::PointerButton::Middle) {
             let d = response.drag_delta();
             self.camera.pan_drag(d.x, d.y, rect.height());
@@ -1029,7 +1035,7 @@ impl App {
         }
 
         // Mouse Wheel: Ctrl + Wheel = Grow / Shrink selection (Meshmixer style), Wheel = Zoom
-        if response.hovered() {
+        if response.hovered() && !is_navigating {
             let ctrl = ui.ctx().input(|i| i.modifiers.ctrl);
             let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
             if ctrl {
@@ -1056,14 +1062,17 @@ impl App {
         let shift = ui.ctx().input(|i| i.modifiers.shift) || self.mode == Mode::BrushErase;
         let is_add = !shift;
 
-        if self.mode != Mode::SymPickLine {
+        let lmb_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+        let lmb_drag = response.dragged_by(egui::PointerButton::Primary);
+
+        if self.mode != Mode::SymPickLine && !is_navigating {
             if response.drag_started_by(egui::PointerButton::Primary)
                 || (response.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
             {
                 self.push_snapshot();
             }
 
-            if response.dragged_by(egui::PointerButton::Primary) || response.is_pointer_button_down_on() {
+            if lmb_drag || (response.hovered() && lmb_down) {
                 if let Some(mesh) = self.display().cloned() {
                     if let Some(bvh) = self.ensure_bvh() {
                         if let Some(pos) = response.interact_pointer_pos() {
@@ -1094,12 +1103,12 @@ impl App {
             }
         }
 
-        // Real-time hover preview computation
+        // Real-time hover preview computation (only when not navigating and not painting)
         let mut new_hover_hit = None;
         let mut new_hover_tris = Vec::new();
         let mut new_hover_r = 0.0f32;
 
-        if self.mode != Mode::SymPickLine && response.hovered() {
+        if self.mode != Mode::SymPickLine && response.hovered() && !is_navigating && !lmb_down {
             if let Some(pos) = response.hover_pos() {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
@@ -1190,7 +1199,7 @@ impl App {
             }
         }
 
-        if self.mode != Mode::SymPickLine && response.hovered() {
+        if self.mode != Mode::SymPickLine && response.hovered() && !is_navigating {
             if let Some(pos) = response.hover_pos() {
                 let (stroke_col, fill_col) = if self.hover_is_erase {
                     (
@@ -1279,31 +1288,33 @@ impl App {
                 );
             }
             if let Some(hit) = &self.hover_hit {
-                if let Some(m) = self.display() {
-                    let r = self.hover_radius_world;
-                    if r > 0.0 && (hit.tri as usize) < m.triangle_count() {
-                        let i0 = m.indices[3 * hit.tri as usize] as usize;
-                        let i1 = m.indices[3 * hit.tri as usize + 1] as usize;
-                        let i2 = m.indices[3 * hit.tri as usize + 2] as usize;
-                        let a = Vec3::from(m.positions[i0]);
-                        let b = Vec3::from(m.positions[i1]);
-                        let c = Vec3::from(m.positions[i2]);
-                        let mut n = (b - a).cross(c - a);
-                        if n.length_squared() > 1e-12 {
-                            n = n.normalize();
-                        } else {
-                            n = self.camera.back();
+                if !is_navigating {
+                    if let Some(m) = self.display() {
+                        let r = self.hover_radius_world;
+                        if r > 0.0 && (hit.tri as usize) < m.triangle_count() {
+                            let i0 = m.indices[3 * hit.tri as usize] as usize;
+                            let i1 = m.indices[3 * hit.tri as usize + 1] as usize;
+                            let i2 = m.indices[3 * hit.tri as usize + 2] as usize;
+                            let a = Vec3::from(m.positions[i0]);
+                            let b = Vec3::from(m.positions[i1]);
+                            let c = Vec3::from(m.positions[i2]);
+                            let mut n = (b - a).cross(c - a);
+                            if n.length_squared() > 1e-12 {
+                                n = n.normalize();
+                            } else {
+                                n = self.camera.back();
+                            }
+                            if n.dot(self.camera.eye() - hit.pos) < 0.0 {
+                                n = -n;
+                            }
+                            let col = if self.hover_is_erase {
+                                [1.0, 0.25, 0.25, 0.95]
+                            } else {
+                                [1.0, 0.65, 0.15, 0.95]
+                            };
+                            let center = hit.pos + n * (r * 0.005);
+                            overlay_lines.extend(circle_lines(center, n, r, col));
                         }
-                        if n.dot(self.camera.eye() - hit.pos) < 0.0 {
-                            n = -n;
-                        }
-                        let col = if self.hover_is_erase {
-                            [1.0, 0.25, 0.25, 0.95]
-                        } else {
-                            [1.0, 0.65, 0.15, 0.95]
-                        };
-                        let center = hit.pos + n * (r * 0.005);
-                        overlay_lines.extend(circle_lines(center, n, r, col));
                     }
                 }
             }
