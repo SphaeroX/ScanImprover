@@ -1299,6 +1299,9 @@ impl App {
                                 self.sel = sel;
                                 self.recount_sel();
                                 self.aux_dirty = true;
+                                if is_add && self.sel_count > 0 {
+                                    self.active_section = Some(crate::ui::ToolSection::Selection);
+                                }
                             }
                         }
                     }

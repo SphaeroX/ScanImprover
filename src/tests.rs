@@ -530,4 +530,42 @@ mod tests {
         app.suppress_sel_drag = false;
         assert!(!app.suppress_sel_drag);
     }
+
+    #[test]
+    fn face_selection_automatically_opens_accordion() {
+        use crate::camera::Camera;
+        use crate::pick;
+        use crate::ui::ToolSection;
+
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        let tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+        app.sel = std::sync::Arc::new(vec![0u8; tris]);
+        app.sel_count = 0;
+        app.active_section = Some(ToolSection::Decimation);
+
+        let bvh = Bvh::new(&m.positions, &m.indices);
+        let mut cam = Camera::default();
+        cam.target = Vec3::ZERO;
+        cam.distance = 20.0;
+        cam.aspect = 4.0 / 3.0;
+        cam.orient = glam::Quat::from_rotation_arc(Vec3::Z, -Vec3::X);
+        let (ro, rd) = cam.screen_ray(400.0, 300.0, 800.0, 600.0);
+        let (t, tri) = bvh.ray_cast(ro, rd, cam.far).expect("center ray should hit");
+        let hit = pick::Hit { pos: ro + rd * t, tri };
+
+        let mut sel = (*app.sel).clone();
+        pick::brush(&m, &bvh, &cam, &hit, 40.0, 600.0, true, &mut sel);
+        app.sel = std::sync::Arc::new(sel);
+        app.recount_sel();
+        if app.sel_count > 0 {
+            app.active_section = Some(ToolSection::Selection);
+        }
+
+        assert!(app.sel_count > 0);
+        assert_eq!(app.active_section, Some(ToolSection::Selection));
+    }
 }
+
