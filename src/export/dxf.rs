@@ -1,4 +1,4 @@
-use crate::geom::fitting::{plane_basis, FittedCircle, FittedPlane};
+use crate::geom::fitting::{FittedCircle, FittedPlane, plane_basis};
 use std::fmt::Write;
 
 /// Generates an AutoCAD 3D-DXF file (R12/2000 compatible) containing
@@ -61,7 +61,8 @@ pub fn generate_dxf(
             out,
             "0\nPOINT\n8\nCIRCLES\n10\n{:.6}\n20\n{:.6}\n30\n{:.6}\n",
             center.x, center.y, center.z
-        ).unwrap();
+        )
+        .unwrap();
 
         // Standard DXF CIRCLE entity with extrusion direction
         write!(

@@ -9,14 +9,7 @@ pub struct Hit {
     pub tri: u32,
 }
 
-pub fn ray_pick(
-    bvh: &Bvh,
-    cam: &Camera,
-    sx: f32,
-    sy: f32,
-    w: f32,
-    h: f32,
-) -> Option<Hit> {
+pub fn ray_pick(bvh: &Bvh, cam: &Camera, sx: f32, sy: f32, w: f32, h: f32) -> Option<Hit> {
     let (ro, rd) = cam.screen_ray(sx, sy, w, h);
     if rd.length_squared() < 0.5 {
         return None;

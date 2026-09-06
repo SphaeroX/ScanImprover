@@ -1,4 +1,4 @@
-use crate::geom::fitting::{plane_basis, FittedCircle, FittedPlane};
+use crate::geom::fitting::{FittedCircle, FittedPlane, plane_basis};
 use std::fmt::Write;
 
 /// Generates a valid ISO 10303-21 (STEP AP214) file containing planar B-Rep surface
@@ -68,11 +68,7 @@ pub fn generate_step(
     id += 1;
 
     let pds_id = id;
-    writeln!(
-        out,
-        "#{id} = PRODUCT_DEFINITION_SHAPE('','',#{pd_id});"
-    )
-    .unwrap();
+    writeln!(out, "#{id} = PRODUCT_DEFINITION_SHAPE('','',#{pd_id});").unwrap();
     id += 1;
 
     // Unit definition: Millimeter & Degree
@@ -224,7 +220,12 @@ pub fn generate_step(
             id += 1;
 
             let vec_id = id;
-            writeln!(out, "#{id} = VECTOR('',#{edir_id},{:.6});", plane_half * 2.0).unwrap();
+            writeln!(
+                out,
+                "#{id} = VECTOR('',#{edir_id},{:.6});",
+                plane_half * 2.0
+            )
+            .unwrap();
             id += 1;
 
             let line_id = id;
@@ -323,12 +324,7 @@ pub fn generate_step(
         id += 1;
 
         let geom_circle_id = id;
-        writeln!(
-            out,
-            "#{id} = CIRCLE('',#{circle_axis_id},{:.6});",
-            r
-        )
-        .unwrap();
+        writeln!(out, "#{id} = CIRCLE('',#{circle_axis_id},{:.6});", r).unwrap();
         id += 1;
 
         // Two semicircular vertices: +u*r and -u*r

@@ -111,11 +111,7 @@ pub fn fit_plane(points: &[[f32; 3]]) -> Option<PlaneFit> {
     let c = centroid_f64(points);
     let mut m = [[0.0f64; 3]; 3];
     for p in points {
-        let d = [
-            p[0] as f64 - c[0],
-            p[1] as f64 - c[1],
-            p[2] as f64 - c[2],
-        ];
+        let d = [p[0] as f64 - c[0], p[1] as f64 - c[1], p[2] as f64 - c[2]];
         for i in 0..3 {
             for j in 0..3 {
                 m[i][j] += d[i] * d[j];
@@ -175,11 +171,7 @@ pub fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
             r[row] -= f * r[col];
         }
     }
-    Some([
-        r[0] / m[0][0],
-        r[1] / m[1][1],
-        r[2] / m[2][2],
-    ])
+    Some([r[0] / m[0][0], r[1] / m[1][1], r[2] / m[2][2]])
 }
 
 pub fn plane_basis(normal: Vec3) -> (Vec3, Vec3) {

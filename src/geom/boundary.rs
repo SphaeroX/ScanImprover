@@ -7,11 +7,7 @@ pub struct EdgeKey(pub u32, pub u32);
 impl EdgeKey {
     #[inline]
     pub fn new(u: u32, v: u32) -> Self {
-        if u < v {
-            EdgeKey(u, v)
-        } else {
-            EdgeKey(v, u)
-        }
+        if u < v { EdgeKey(u, v) } else { EdgeKey(v, u) }
     }
 }
 

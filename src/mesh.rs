@@ -101,18 +101,14 @@ impl Mesh {
     }
 
     pub fn transform(&mut self, rotation: Quat, translation: Vec3) {
-        self.positions
-            .par_iter_mut()
-            .for_each(|p: &mut [f32; 3]| {
-                let v = rotation * Vec3::from(*p) + translation;
-                *p = v.to_array();
-            });
-        self.normals
-            .par_iter_mut()
-            .for_each(|n: &mut [f32; 3]| {
-                let v = rotation * Vec3::from(*n);
-                *n = v.to_array();
-            });
+        self.positions.par_iter_mut().for_each(|p: &mut [f32; 3]| {
+            let v = rotation * Vec3::from(*p) + translation;
+            *p = v.to_array();
+        });
+        self.normals.par_iter_mut().for_each(|n: &mut [f32; 3]| {
+            let v = rotation * Vec3::from(*n);
+            *n = v.to_array();
+        });
     }
 
     pub fn bbox(&self) -> Aabb {

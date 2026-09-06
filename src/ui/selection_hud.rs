@@ -1,4 +1,4 @@
-﻿use crate::app::App;
+use crate::app::App;
 use eframe::egui;
 
 /// Renders a floating HUD pill at the top-center of the 3D viewport when faces are selected.
@@ -26,7 +26,8 @@ pub fn render_selection_hud(app: &mut App, ui: &mut egui::Ui, viewport_rect: egu
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         // Orange indicator dot
-                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::empty());
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::empty());
                         ui.painter().circle_filled(
                             dot_rect.center(),
                             4.0,

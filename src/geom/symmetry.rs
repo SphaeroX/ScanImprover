@@ -157,7 +157,6 @@ pub fn compute_sym_rms(
     }
 }
 
-
 fn nelder_mead(
     f: &dyn Fn([f64; 3]) -> f64,
     x0: [f64; 3],
@@ -250,11 +249,7 @@ pub fn detect_symmetry_from_line(
     let u = diff / len;
     let p0 = (a + b) * 0.5;
 
-    let v_ref = if u.x.abs() < 0.9 {
-        Vec3::X
-    } else {
-        Vec3::Y
-    };
+    let v_ref = if u.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
     let e1 = u.cross(v_ref).normalize();
     let e2 = u.cross(e1).normalize();
 
@@ -272,7 +267,10 @@ pub fn detect_symmetry_from_line(
     let num_steps = 90; // 2 degree steps
     let step_rad = std::f64::consts::PI / (num_steps as f64);
     let mut best_sweep_err = f64::INFINITY;
-    let mut sweep_plane = SymPlane { normal: e1, point: p0 };
+    let mut sweep_plane = SymPlane {
+        normal: e1,
+        point: p0,
+    };
 
     for i in 0..num_steps {
         let alpha = (i as f64) * step_rad;
@@ -315,7 +313,10 @@ pub fn detect_symmetry_from_line(
 
         let n = (n0 + v0 * (da.tan() as f32) + u * (db.tan() as f32)).normalize();
         let pt = p0 + n0 * (dd as f32);
-        let plane = SymPlane { normal: n, point: pt };
+        let plane = SymPlane {
+            normal: n,
+            point: pt,
+        };
         robust_sym_loss(bvh, &fine, &plane, mask, c_fine) + penalty
     };
 
@@ -398,11 +399,7 @@ pub fn detect_symmetry_masked(
     }
     let mut m = [[0.0f64; 3]; 3];
     for p in &coarse {
-        let d = [
-            p.x as f64 - c[0],
-            p.y as f64 - c[1],
-            p.z as f64 - c[2],
-        ];
+        let d = [p.x as f64 - c[0], p.y as f64 - c[1], p.z as f64 - c[2]];
         for i in 0..3 {
             for j in 0..3 {
                 m[i][j] += d[i] * d[j];

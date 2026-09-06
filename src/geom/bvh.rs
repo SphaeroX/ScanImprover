@@ -96,16 +96,10 @@ impl Bvh {
             } else {
                 let l = self.node_left[n];
                 let r = self.node_right[n];
-                let ld2 = point_aabb_dist_sq(
-                    p,
-                    &self.node_min[l as usize],
-                    &self.node_max[l as usize],
-                );
-                let rd2 = point_aabb_dist_sq(
-                    p,
-                    &self.node_min[r as usize],
-                    &self.node_max[r as usize],
-                );
+                let ld2 =
+                    point_aabb_dist_sq(p, &self.node_min[l as usize], &self.node_max[l as usize]);
+                let rd2 =
+                    point_aabb_dist_sq(p, &self.node_min[r as usize], &self.node_max[r as usize]);
                 if ld2 < best_d2 {
                     stack[sp] = (l, ld2);
                     sp += 1;
@@ -178,11 +172,7 @@ impl Bvh {
                 }
             }
         }
-        if hit {
-            Some((best_t, best_tri))
-        } else {
-            None
-        }
+        if hit { Some((best_t, best_tri)) } else { None }
     }
 
     pub fn query_sphere(&self, center: Vec3, radius: f32, out: &mut Vec<u32>) {
@@ -198,11 +188,7 @@ impl Bvh {
             sp -= 1;
             let node = stack[sp];
             let n = node as usize;
-            let d2 = point_aabb_dist_sq(
-                center,
-                &self.node_min[n],
-                &self.node_max[n],
-            );
+            let d2 = point_aabb_dist_sq(center, &self.node_min[n], &self.node_max[n]);
             if d2 > r2 {
                 continue;
             }
@@ -412,9 +398,5 @@ pub fn ray_triangle(ro: Vec3, rd: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32
         return None;
     }
     let t = e2.dot(qvec) * inv_det;
-    if t > 1e-6 {
-        Some(t)
-    } else {
-        None
-    }
+    if t > 1e-6 { Some(t) } else { None }
 }

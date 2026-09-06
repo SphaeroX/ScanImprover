@@ -26,11 +26,20 @@ pub fn accordion_header(
     };
 
     let stroke = if is_open {
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(110, 155, 240, 95))
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(110, 155, 240, 95),
+        )
     } else if is_hovered {
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28))
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+        )
     } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+        )
     };
 
     let text_color = if is_open {
@@ -42,23 +51,21 @@ pub fn accordion_header(
     };
 
     // Draw header background
-    ui.painter().rect(
-        rect,
-        5.0,
-        bg_color,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
+    ui.painter()
+        .rect(rect, 5.0, bg_color, stroke, egui::StrokeKind::Inside);
 
     // Left accent indicator for open section
     if is_open {
-        let accent_rect = egui::Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.min.x + 3.5, rect.max.y),
-        );
+        let accent_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + 3.5, rect.max.y));
         ui.painter().rect_filled(
             accent_rect,
-            egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 5,
+                sw: 5,
+                ne: 0,
+                se: 0,
+            },
             egui::Color32::from_rgb(120, 175, 255),
         );
     }
@@ -115,13 +122,9 @@ pub fn accordion_header(
                     .inner_margin(egui::Margin::symmetric(5, 2))
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(b)
-                                    .size(10.5)
-                                    .color(badge_fg),
-                            )
-                            .selectable(false)
-                            .sense(egui::Sense::empty()),
+                            egui::Label::new(egui::RichText::new(b).size(10.5).color(badge_fg))
+                                .selectable(false)
+                                .sense(egui::Sense::empty()),
                         );
                     });
             });

@@ -1,8 +1,7 @@
 use crate::mesh::Mesh;
 
 pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| "OBJ file is not valid UTF-8".to_string())?;
+    let text = std::str::from_utf8(bytes).map_err(|_| "OBJ file is not valid UTF-8".to_string())?;
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     for (li, line) in text.lines().enumerate() {
@@ -16,9 +15,9 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
             "v" => {
                 let mut p = [0.0f32; 3];
                 for c in p.iter_mut() {
-                    let t = toks
-                        .next()
-                        .ok_or_else(|| format!("OBJ line {}: vertex needs 3 coordinates", li + 1))?;
+                    let t = toks.next().ok_or_else(|| {
+                        format!("OBJ line {}: vertex needs 3 coordinates", li + 1)
+                    })?;
                     *c = t
                         .parse::<f32>()
                         .map_err(|_| format!("OBJ line {}: invalid float", li + 1))?;
@@ -68,21 +67,11 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
 pub fn save(mesh: &Mesh) -> String {
     let mut out = String::with_capacity(mesh.positions.len() * 40 + mesh.indices.len() * 8);
     for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
-        out.push_str(&format!(
-            "v {} {} {}\n",
-            fmt(p[0]),
-            fmt(p[1]),
-            fmt(p[2])
-        ));
+        out.push_str(&format!("v {} {} {}\n", fmt(p[0]), fmt(p[1]), fmt(p[2])));
         let _ = n;
     }
     for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
-        out.push_str(&format!(
-            "vn {} {} {}\n",
-            fmt(n[0]),
-            fmt(n[1]),
-            fmt(n[2])
-        ));
+        out.push_str(&format!("vn {} {} {}\n", fmt(n[0]), fmt(n[1]), fmt(n[2])));
         let _ = p;
     }
     for t in 0..mesh.triangle_count() {

@@ -8,11 +8,7 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
                 .try_into()
                 .map_err(|_| "Invalid STL header".to_string())?,
         ) as usize;
-        if n
-            .checked_mul(50)
-                .and_then(|body| body.checked_add(84))
-            == Some(bytes.len())
-        {
+        if n.checked_mul(50).and_then(|body| body.checked_add(84)) == Some(bytes.len()) {
             return load_binary(bytes, n);
         }
     }
@@ -78,10 +74,7 @@ fn load_ascii(bytes: &[u8]) -> Result<Mesh, String> {
 pub fn save(mesh: &Mesh, path: &std::path::Path) -> Vec<u8> {
     let n = mesh.triangle_count();
     let mut out = Vec::with_capacity(84 + n * 50);
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("mesh");
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
     let header = format!("ScanImprover {name}");
     let mut head = [0u8; 80];
     let hb = header.as_bytes();

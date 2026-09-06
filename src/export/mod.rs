@@ -14,7 +14,12 @@ pub enum ExportFormat {
 
 impl ExportFormat {
     pub fn from_path(path: &Path) -> Self {
-        match path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
+        match path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
             Some("py") => ExportFormat::FusionScript,
             Some("dxf") => ExportFormat::Dxf,
             _ => ExportFormat::Step,
@@ -132,6 +137,12 @@ pub fn export_all_references_dialog(
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

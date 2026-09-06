@@ -31,6 +31,5 @@ pub fn save_any(path: &Path, mesh: &Mesh) -> Result<(), String> {
         "obj" => obj::save(mesh).into_bytes(),
         other => return Err(format!("Unsupported export type: .{other}")),
     };
-    std::fs::write(path, bytes)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    std::fs::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }

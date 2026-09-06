@@ -128,6 +128,12 @@ pub struct App {
     pub(crate) suppress_sel_drag: bool,
     pub(crate) active_section: Option<crate::ui::ToolSection>,
     pub(crate) align_slots: crate::geom::alignment::AlignmentSlots,
+    pub(crate) repair_holes: Vec<crate::geom::hole_detect::HoleLoop>,
+    pub(crate) repair_selected_hole: Option<usize>,
+    pub(crate) repair_method: crate::geom::hole_fill::HoleFillMethod,
+    pub(crate) repair_preview_active: bool,
+    pub(crate) repair_preview_patch: Option<crate::geom::hole_fill::MeshPatch>,
+    pub(crate) repair_health: Option<crate::geom::repair::MeshHealthReport>,
 }
 
 impl App {
@@ -200,6 +206,12 @@ impl App {
             suppress_sel_drag: false,
             active_section: Some(crate::ui::ToolSection::Decimation),
             align_slots: crate::geom::alignment::AlignmentSlots::default(),
+            repair_holes: Vec::new(),
+            repair_selected_hole: None,
+            repair_method: crate::geom::hole_fill::HoleFillMethod::PlanarFan,
+            repair_preview_active: true,
+            repair_preview_patch: None,
+            repair_health: None,
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -257,6 +269,10 @@ impl App {
             self.topology = None;
             self.hover_hit = None;
             self.hover_tris.clear();
+            self.repair_holes.clear();
+            self.repair_selected_hole = None;
+            self.repair_preview_patch = None;
+            self.repair_health = None;
             self.mesh_dirty = true;
             self.aux_dirty = true;
             self.recount_sel();
@@ -305,6 +321,10 @@ impl App {
                     self.selected_plane_id = None;
                     self.selected_circle_id = None;
                     self.next_obj_id = 1;
+                    self.repair_holes.clear();
+                    self.repair_selected_hole = None;
+                    self.repair_preview_patch = None;
+                    self.repair_health = None;
                     self.undo.clear();
                     self.mesh_dirty = true;
                     self.aux_dirty = true;
@@ -1130,6 +1150,157 @@ impl App {
             self.status = "Reset to original mesh.".to_string();
         }
     }
+
+    pub(crate) fn set_mesh_modified(&mut self, next_mesh: Mesh, status_msg: String) {
+        let tris = next_mesh.triangle_count();
+        let m = Arc::new(next_mesh);
+        self.bbox = m.bbox();
+        self.current = Some(m.clone());
+        self.preview = None;
+        self.sel = Arc::new(vec![0u8; tris]);
+        self.sel_count = 0;
+        self.bvh = None;
+        self.topology = None;
+        self.hover_hit = None;
+        self.hover_tris.clear();
+        self.deviation = None;
+        self.heat = None;
+        self.mesh_dirty = true;
+        self.aux_dirty = true;
+        self.wire_dirty = true;
+        self.status = status_msg;
+        self.refresh_repair();
+    }
+
+    pub(crate) fn refresh_repair(&mut self) {
+        if let Some(m) = self.display().cloned() {
+            let holes = crate::geom::hole_detect::detect_holes(&m);
+            let health = crate::geom::repair::analyze_mesh(&m);
+            self.repair_holes = holes;
+            self.repair_health = Some(health);
+            if let Some(sel) = self.repair_selected_hole {
+                if sel >= self.repair_holes.len() {
+                    self.repair_selected_hole = None;
+                }
+            }
+            self.update_hole_preview();
+        }
+    }
+
+    pub(crate) fn set_hole_fill_method(&mut self, method: crate::geom::hole_fill::HoleFillMethod) {
+        self.repair_method = method;
+        self.update_hole_preview();
+    }
+
+    pub(crate) fn set_hole_preview_active(&mut self, active: bool) {
+        self.repair_preview_active = active;
+        self.update_hole_preview();
+    }
+
+    pub(crate) fn select_hole(&mut self, idx: Option<usize>) {
+        self.repair_selected_hole = idx;
+        self.update_hole_preview();
+    }
+
+    pub(crate) fn focus_selected_hole(&mut self) {
+        if let Some(idx) = self.repair_selected_hole {
+            if let Some(hole) = self.repair_holes.get(idx) {
+                self.camera.fit(&hole.bbox);
+            }
+        }
+    }
+
+    pub(crate) fn update_hole_preview(&mut self) {
+        if !self.repair_preview_active {
+            self.repair_preview_patch = None;
+            return;
+        }
+        let m_opt = self.display().cloned();
+        let hole_opt = self
+            .repair_selected_hole
+            .and_then(|idx| self.repair_holes.get(idx).cloned());
+
+        if let (Some(m), Some(hole)) = (m_opt, hole_opt) {
+            match crate::geom::hole_fill::generate_hole_patch(&m, &hole, self.repair_method) {
+                Ok(patch) => self.repair_preview_patch = Some(patch),
+                Err(e) => {
+                    self.status = format!("Preview error: {e}");
+                    self.repair_preview_patch = None;
+                }
+            }
+        } else {
+            self.repair_preview_patch = None;
+        }
+    }
+
+    pub(crate) fn fill_selected_hole(&mut self) {
+        if let Some(idx) = self.repair_selected_hole {
+            if let Some(hole) = self.repair_holes.get(idx).cloned() {
+                if let Some(curr) = self.current.clone() {
+                    match crate::geom::hole_fill::generate_hole_patch(&curr, &hole, self.repair_method) {
+                        Ok(patch) => {
+                            self.push_snapshot();
+                            let mut next_mesh = (*curr).clone();
+                            crate::geom::hole_fill::apply_patch(&mut next_mesh, &patch);
+                            let method_name = self.repair_method.display_name();
+                            self.set_mesh_modified(next_mesh, format!("Hole #{} filled using {}.", hole.id, method_name));
+                        }
+                        Err(e) => self.status = format!("Failed to fill hole: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn fill_all_holes(&mut self) {
+        if self.repair_holes.is_empty() {
+            self.status = "No holes to fill.".to_string();
+            return;
+        }
+        if let Some(curr) = self.current.clone() {
+            match crate::geom::hole_fill::fill_holes(&curr, &self.repair_holes, self.repair_method) {
+                Ok(next_mesh) => {
+                    self.push_snapshot();
+                    let count = self.repair_holes.len();
+                    let method_name = self.repair_method.display_name();
+                    self.set_mesh_modified(next_mesh, format!("Filled all {count} holes using {}.", method_name));
+                }
+                Err(e) => self.status = format!("Failed to fill all holes: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn auto_repair(&mut self) {
+        if let Some(curr) = self.current.clone() {
+            self.push_snapshot();
+            let (next_mesh, summary) = crate::geom::repair::auto_repair_mesh(&curr);
+            self.set_mesh_modified(next_mesh, summary);
+        }
+    }
+
+    pub(crate) fn unify_normals_action(&mut self) {
+        if let Some(curr) = self.current.clone() {
+            self.push_snapshot();
+            let next_mesh = crate::geom::repair::unify_normals(&curr);
+            self.set_mesh_modified(next_mesh, "Unified triangle normals across all shared edges.".to_string());
+        }
+    }
+
+    pub(crate) fn remove_small_components_action(&mut self) {
+        if let Some(curr) = self.current.clone() {
+            self.push_snapshot();
+            let next_mesh = crate::geom::repair::remove_small_components(&curr, false, 0.005);
+            self.set_mesh_modified(next_mesh, "Removed small floating components (< 0.5% faces).".to_string());
+        }
+    }
+
+    pub(crate) fn remove_degenerate_faces_action(&mut self) {
+        if let Some(curr) = self.current.clone() {
+            self.push_snapshot();
+            let next_mesh = crate::geom::repair::remove_degenerate_faces(&curr);
+            self.set_mesh_modified(next_mesh, "Removed degenerate and zero-area faces.".to_string());
+        }
+    }
 }
 
 pub(crate) fn rotation_between(from: Vec3, to: Vec3) -> Quat {
@@ -1754,6 +1925,51 @@ impl App {
                     self.sym_pick[1],
                     [1.0, 1.0, 0.3, 1.0],
                 );
+            }
+            if self.active_section == Some(crate::ui::ToolSection::Repair) || !self.repair_holes.is_empty() {
+                if let Some(m) = self.display() {
+                    let pos = &m.positions;
+                    for (h_idx, hole) in self.repair_holes.iter().enumerate() {
+                        let is_sel = self.repair_selected_hole == Some(h_idx);
+                        let edge_col = if is_sel {
+                            [0.1, 0.95, 1.0, 1.0]
+                        } else {
+                            [1.0, 0.65, 0.2, 0.75]
+                        };
+                        let n_verts = hole.vertices.len();
+                        for i in 0..n_verts {
+                            let p0 = Vec3::from(pos[hole.vertices[i] as usize]);
+                            let p1 = Vec3::from(pos[hole.vertices[(i + 1) % n_verts] as usize]);
+                            if is_sel {
+                                push_line(&mut overlay_lines, p0, p1, edge_col);
+                            } else {
+                                push_line(&mut depth_lines, p0, p1, edge_col);
+                            }
+                        }
+                        if is_sel {
+                            overlay_lines.extend(marker_lines(hole.centroid, diag * 0.015, [0.1, 0.95, 1.0, 1.0]));
+                        }
+                    }
+                }
+            }
+            if self.repair_preview_active {
+                if let Some(patch) = &self.repair_preview_patch {
+                    let fill_col = [0.15, 0.85, 0.95, 0.35];
+                    let wire_col = [0.2, 0.95, 1.0, 0.9];
+                    for chunk in patch.preview_indices.chunks_exact(3) {
+                        let p0 = Vec3::from(patch.preview_positions[chunk[0] as usize]);
+                        let p1 = Vec3::from(patch.preview_positions[chunk[1] as usize]);
+                        let p2 = Vec3::from(patch.preview_positions[chunk[2] as usize]);
+
+                        fills.push([p0.x, p0.y, p0.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+                        fills.push([p1.x, p1.y, p1.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+                        fills.push([p2.x, p2.y, p2.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+
+                        push_line(&mut overlay_lines, p0, p1, wire_col);
+                        push_line(&mut overlay_lines, p1, p2, wire_col);
+                        push_line(&mut overlay_lines, p2, p0, wire_col);
+                    }
+                }
             }
             if let Some(hit) = &self.hover_hit {
                 if !is_navigating {

@@ -4,7 +4,7 @@ use crate::geom::distance::{self, Deviation};
 use crate::geom::symmetry::{self, SymPlane};
 use crate::mesh::Mesh;
 use glam::Vec3;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Clone, Copy, Debug)]
@@ -191,8 +191,7 @@ type AutoCandidate = (Mesh, f32, Deviation, Vec<f32>);
 fn measure(mesh: &Mesh, simplified: &Mesh) -> (Deviation, Vec<f32>) {
     let bvh = Bvh::new(&simplified.positions, &simplified.indices);
     let dev = distance::deviation(&mesh.positions, &bvh);
-    let per_tri =
-        distance::per_triangle_max(&mesh.positions, &bvh, simplified.triangle_count());
+    let per_tri = distance::per_triangle_max(&mesh.positions, &bvh, simplified.triangle_count());
     let heat = distance::per_vertex_max(&per_tri, &simplified.indices, simplified.positions.len());
     (dev, heat)
 }
@@ -306,12 +305,10 @@ fn run(job: Job) -> JobResult {
                 SymmetryJobKind::FromLine { a, b } => {
                     symmetry::detect_symmetry_from_line(&mesh, &bvh, a, b, mask_slice)
                 }
-                SymmetryJobKind::Refine(p) => {
-                    Some(symmetry::refine_symmetry_masked(&mesh, &bvh, &p, mask_slice))
-                }
-                SymmetryJobKind::Auto => {
-                    symmetry::detect_symmetry_masked(&mesh, &bvh, mask_slice)
-                }
+                SymmetryJobKind::Refine(p) => Some(symmetry::refine_symmetry_masked(
+                    &mesh, &bvh, &p, mask_slice,
+                )),
+                SymmetryJobKind::Auto => symmetry::detect_symmetry_masked(&mesh, &bvh, mask_slice),
             };
             JobResult::Symmetry { id, plane: res }
         }

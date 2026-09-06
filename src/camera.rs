@@ -110,8 +110,7 @@ impl Camera {
         let ndc_x = (sx / w.max(1.0)) * 2.0 - 1.0;
         let ndc_y = 1.0 - 2.0 * (sy / h.max(1.0));
         let t = (self.fov_y * 0.5).tan();
-        let dir =
-            -self.back() + self.right() * (ndc_x * t * self.aspect) + self.up() * (ndc_y * t);
+        let dir = -self.back() + self.right() * (ndc_x * t * self.aspect) + self.up() * (ndc_y * t);
         (self.eye(), dir.normalize_or_zero())
     }
 }

@@ -3,14 +3,11 @@ use std::fmt::Write;
 
 /// Generates a Python script (.py) for Autodesk Fusion 360 that creates native
 /// Construction Planes and Sketch Circles directly in the active design.
-pub fn generate_fusion_script(
-    planes: &[&FittedPlane],
-    circles: &[&FittedCircle],
-) -> String {
+pub fn generate_fusion_script(planes: &[&FittedPlane], circles: &[&FittedCircle]) -> String {
     let mut out = String::with_capacity(4096);
 
     out.push_str(
-r#"# Author: ScanImprover
+        r#"# Author: ScanImprover
 # Description: Automatically creates Construction Planes and Sketch Circles matching your 3D scan.
 # Usage in Fusion 360:
 # 1. Open or insert your scan in Fusion 360.
@@ -39,7 +36,8 @@ def run(context):
         created_planes = 0
         created_circles = 0
 
-"#);
+"#,
+    );
 
     // Planes definition
     for p in planes {

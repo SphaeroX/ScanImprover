@@ -152,16 +152,13 @@ fn parse_header(text: &str) -> Result<(Format, Vec<Elem>), String> {
                     Some("ascii") => Format::Ascii,
                     Some("binary_little_endian") => Format::BinaryLe,
                     Some("binary_big_endian") => {
-                        return Err("Big-endian PLY is not supported".to_string())
+                        return Err("Big-endian PLY is not supported".to_string());
                     }
                     _ => return Err("Invalid PLY format line".to_string()),
                 });
             }
             Some("element") => {
-                let name = toks
-                    .next()
-                    .ok_or("PLY element without name")?
-                    .to_string();
+                let name = toks.next().ok_or("PLY element without name")?.to_string();
                 let count: usize = toks
                     .next()
                     .and_then(|c| c.parse().ok())
@@ -173,9 +170,7 @@ fn parse_header(text: &str) -> Result<(Format, Vec<Elem>), String> {
                 });
             }
             Some("property") => {
-                let elem = elems
-                    .last_mut()
-                    .ok_or("PLY property outside element")?;
+                let elem = elems.last_mut().ok_or("PLY property outside element")?;
                 let rest: Vec<&str> = toks.collect();
                 if rest.is_empty() {
                     return Err("PLY property without type".to_string());
@@ -196,10 +191,7 @@ fn parse_header(text: &str) -> Result<(Format, Vec<Elem>), String> {
                 } else {
                     let ty = Type::parse(rest[0])
                         .ok_or_else(|| format!("Unknown PLY type '{}'", rest[0]))?;
-                    let name = rest
-                        .get(1)
-                        .ok_or("PLY property without name")?
-                        .to_string();
+                    let name = rest.get(1).ok_or("PLY property without name")?.to_string();
                     elem.props.push(Prop {
                         ty,
                         name,

@@ -148,10 +148,7 @@ pub fn grow_selection(
 
 /// Shrinks the current selection by 1 ring of triangles along the selection boundary.
 /// Any selected triangle adjacent to an unselected triangle or an open mesh edge is deselected.
-pub fn shrink_selection(
-    topo: &MeshTopology,
-    current_sel: &[u8],
-) -> Vec<u8> {
+pub fn shrink_selection(topo: &MeshTopology, current_sel: &[u8]) -> Vec<u8> {
     let nt = topo.triangle_count();
     if current_sel.len() != nt {
         return current_sel.to_vec();

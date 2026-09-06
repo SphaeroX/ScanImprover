@@ -1,6 +1,7 @@
 pub mod accordion;
 pub mod alignment;
 pub mod object_browser;
+pub mod repair;
 pub mod sections;
 pub mod selection_hud;
 
@@ -15,6 +16,7 @@ pub enum ToolSection {
     Symmetry,
     Selection,
     Coordinates,
+    Repair,
 }
 
 /// Renders the complete left panel with the accordion sections.
@@ -111,6 +113,38 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         if coord_open {
             accordion_body(ui, |ui| {
                 sections::render_coordinates(app, ui);
+            });
+        }
+        ui.add_space(3.0);
+
+        // Section 5: Mesh repair
+        let repair_badge_str = if !app.repair_holes.is_empty() {
+            Some(format!("{} holes", app.repair_holes.len()))
+        } else if let Some(h) = &app.repair_health {
+            if h.is_watertight {
+                Some("Watertight".to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let repair_open = app.active_section == Some(ToolSection::Repair);
+        if accordion_header(
+            ui,
+            "Mesh repair",
+            repair_open,
+            repair_badge_str.as_deref(),
+        ) {
+            app.active_section = if repair_open {
+                None
+            } else {
+                Some(ToolSection::Repair)
+            };
+        }
+        if repair_open {
+            accordion_body(ui, |ui| {
+                repair::render_repair(app, ui);
             });
         }
         ui.add_space(6.0);

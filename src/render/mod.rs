@@ -155,14 +155,12 @@ impl DynBuf {
     fn ensure(&mut self, device: &wgpu::Device, size: u64, label: &str) {
         if self.cap < size {
             self.cap = size.max(4096).next_power_of_two();
-            self.buf = Some(
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: self.cap,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-            );
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: self.cap,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
         }
     }
 }
@@ -204,7 +202,11 @@ pub struct GpuState {
 }
 
 impl GpuState {
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, target_format: wgpu::TextureFormat) -> GpuState {
+    pub fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) -> GpuState {
         let bglayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scanimprover-uniform-layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -349,7 +351,8 @@ impl GpuState {
             cache: None,
         });
 
-        let make_line_pipe = |depth: Option<wgpu::DepthStencilState>, target: wgpu::ColorTargetState| {
+        let make_line_pipe = |depth: Option<wgpu::DepthStencilState>,
+                              target: wgpu::ColorTargetState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("scanimprover-line-pipe"),
                 layout: Some(&pipe_layout),
@@ -512,16 +515,20 @@ impl GpuState {
         for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
             geom.push([p[0], p[1], p[2], n[0], n[1], n[2]]);
         }
-        let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scanimprover-mesh-vb"),
-            contents: bytemuck::cast_slice(&geom),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scanimprover-mesh-ib"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let vb = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scanimprover-mesh-vb"),
+                contents: bytemuck::cast_slice(&geom),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let ib = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("scanimprover-mesh-ib"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
         let aux_data = vec![[0.0f32; 2]; nv];
         self.aux
             .ensure(&self.device, (nv * 8) as u64, "scanimprover-aux");
@@ -542,13 +549,16 @@ impl GpuState {
     }
 
     pub fn upload_aux(&mut self, aux: &[[f32; 2]]) {
-        let nv = self.mesh.as_ref().map(|m| m.vert_count as usize).unwrap_or(0);
+        let nv = self
+            .mesh
+            .as_ref()
+            .map(|m| m.vert_count as usize)
+            .unwrap_or(0);
         if aux.len() != nv {
             return;
         }
         if let Some(buf) = self.aux.buf.as_ref() {
-            self.queue
-                .write_buffer(buf, 0, bytemuck::cast_slice(aux));
+            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(aux));
         }
     }
 
@@ -561,8 +571,16 @@ impl GpuState {
         }
         let mut edges = std::collections::HashSet::with_capacity(mesh.indices.len() * 2);
         let mut data: Vec<[f32; 7]> = Vec::with_capacity(mesh.indices.len() * 2);
-        let push = |a: usize, b: usize, data: &mut Vec<[f32; 7]>, mesh: &Mesh, edges: &mut std::collections::HashSet<(u32, u32)>| {
-            let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
+        let push = |a: usize,
+                    b: usize,
+                    data: &mut Vec<[f32; 7]>,
+                    mesh: &Mesh,
+                    edges: &mut std::collections::HashSet<(u32, u32)>| {
+            let key = if a < b {
+                (a as u32, b as u32)
+            } else {
+                (b as u32, a as u32)
+            };
             if edges.insert(key) {
                 let pa = mesh.positions[a];
                 let pb = mesh.positions[b];
@@ -601,7 +619,8 @@ impl GpuState {
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
             params: [if heat_on { 1.0 } else { 0.0 }, heat_scale, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
+        self.queue
+            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
         self.show_mesh = show_mesh;
         self.show_wireframe = show_wireframe;
     }
@@ -631,8 +650,11 @@ impl GpuState {
     }
 
     pub fn write_fills(&mut self, fills: &[[f32; 7]]) {
-        self.fills
-            .ensure(&self.device, (fills.len().max(1) * 28) as u64, "scanimprover-fills");
+        self.fills.ensure(
+            &self.device,
+            (fills.len().max(1) * 28) as u64,
+            "scanimprover-fills",
+        );
         if let Some(buf) = self.fills.buf.as_ref() {
             self.queue.write_buffer(buf, 0, bytemuck::cast_slice(fills));
         }

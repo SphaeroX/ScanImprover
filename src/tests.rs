@@ -774,4 +774,184 @@ mod tests {
             "Undo should restore previous circle center"
         );
     }
+
+    #[test]
+    fn test_hole_detection_single_and_multiple() {
+        use crate::geom::hole_detect::detect_holes;
+
+        let m = box_mesh(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        // Watertight: 0 holes
+        let holes_none = detect_holes(&m);
+        assert_eq!(holes_none.len(), 0, "Watertight box has 0 holes");
+
+        // Remove 1 triangle (indices 0..3) -> 1 triangular hole with 3 edges
+        let mut open_idx = m.indices.clone();
+        open_idx.drain(0..3);
+        let m_open1 = Mesh::from_indexed(m.positions.clone(), open_idx);
+        let holes1 = detect_holes(&m_open1);
+        assert_eq!(holes1.len(), 1, "Should detect exactly 1 hole");
+        assert_eq!(holes1[0].edge_count(), 3, "Triangle hole has 3 edges");
+        assert!(holes1[0].perimeter > 0.0);
+
+        // Remove a 2-triangle face (a full quad on one side) -> 1 quad hole with 4 edges
+        let mut open_quad_idx = m.indices.clone();
+        open_quad_idx.drain(0..6);
+        let m_quad = Mesh::from_indexed(m.positions.clone(), open_quad_idx);
+        let holes_quad = detect_holes(&m_quad);
+        assert_eq!(holes_quad.len(), 1, "Should detect 1 quad hole");
+        assert_eq!(holes_quad[0].edge_count(), 4, "Quad hole has 4 edges");
+
+        // Remove two opposite triangles on different sides -> 2 separate holes
+        let mut two_holes_idx = m.indices.clone();
+        // Remove triangle 0 (0..3) and triangle 6 (18..21)
+        two_holes_idx.drain(18..21);
+        two_holes_idx.drain(0..3);
+        let m_two = Mesh::from_indexed(m.positions.clone(), two_holes_idx);
+        let holes2 = detect_holes(&m_two);
+        assert_eq!(holes2.len(), 2, "Should detect 2 independent holes");
+    }
+
+    #[test]
+    fn test_hole_filling_all_algorithms() {
+        use crate::geom::hole_detect::detect_holes;
+        use crate::geom::hole_fill::{
+            HoleFillMethod, apply_patch, fill_holes, generate_hole_patch,
+        };
+
+        let m = box_mesh(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        // Remove 2 triangles (indices 0..6) to create an open hole
+        let mut open_idx = m.indices.clone();
+        open_idx.drain(0..6);
+        let m_open = Mesh::from_indexed(m.positions.clone(), open_idx);
+
+        let holes = detect_holes(&m_open);
+        assert_eq!(holes.len(), 1);
+        let target_hole = &holes[0];
+
+        // 1. Planar Fan
+        let mut m_fan = m_open.clone();
+        let patch_fan =
+            generate_hole_patch(&m_fan, target_hole, HoleFillMethod::PlanarFan).unwrap();
+        apply_patch(&mut m_fan, &patch_fan);
+        let holes_after_fan = detect_holes(&m_fan);
+        assert_eq!(
+            holes_after_fan.len(),
+            0,
+            "Mesh must be closed after PlanarFan"
+        );
+
+        // 2. Ear Clipping
+        let mut m_ear = m_open.clone();
+        let patch_ear =
+            generate_hole_patch(&m_ear, target_hole, HoleFillMethod::EarClipping).unwrap();
+        apply_patch(&mut m_ear, &patch_ear);
+        let holes_after_ear = detect_holes(&m_ear);
+        assert_eq!(
+            holes_after_ear.len(),
+            0,
+            "Mesh must be closed after EarClipping"
+        );
+
+        // 3. Minimal Area Triangulation
+        let mut m_area = m_open.clone();
+        let patch_area =
+            generate_hole_patch(&m_area, target_hole, HoleFillMethod::MinimalArea).unwrap();
+        apply_patch(&mut m_area, &patch_area);
+        let holes_after_area = detect_holes(&m_area);
+        assert_eq!(
+            holes_after_area.len(),
+            0,
+            "Mesh must be closed after MinimalArea"
+        );
+
+        // 4. Liepa Smooth (Refined & Faired)
+        let mut m_liepa = m_open.clone();
+        let patch_liepa =
+            generate_hole_patch(&m_liepa, target_hole, HoleFillMethod::LiepaSmooth).unwrap();
+        apply_patch(&mut m_liepa, &patch_liepa);
+        let holes_after_liepa = detect_holes(&m_liepa);
+        assert_eq!(
+            holes_after_liepa.len(),
+            0,
+            "Mesh must be closed after LiepaSmooth"
+        );
+
+        // 5. Batch fill all holes
+        let filled_batch = fill_holes(&m_open, &holes, HoleFillMethod::MinimalArea).unwrap();
+        assert_eq!(detect_holes(&filled_batch).len(), 0);
+    }
+
+    #[test]
+    fn test_mesh_diagnostics_and_repair() {
+        use crate::geom::repair::{
+            analyze_mesh, auto_repair_mesh, remove_degenerate_faces,
+            remove_small_components, unify_normals,
+        };
+
+        // 1. Watertight check
+        let m = box_mesh(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        let rep = analyze_mesh(&m);
+        assert!(rep.is_watertight, "Box mesh should be watertight");
+        assert_eq!(rep.euler_characteristic, 2);
+        assert_eq!(rep.genus, 0);
+
+        // 2. Degenerate faces detection and removal
+        let mut pos = m.positions.clone();
+        let mut idx = m.indices.clone();
+        // Add a collapsed triangle: (0, 0, 1)
+        idx.extend_from_slice(&[0, 0, 1]);
+        // Add a colinear triangle: (0, 1, mid)
+        let mid = [5.0, 0.0, 0.0];
+        let mid_idx = pos.len() as u32;
+        pos.push(mid);
+        idx.extend_from_slice(&[0, 1, mid_idx]);
+
+        let m_degen = Mesh::from_indexed(pos, idx);
+        let rep_degen = analyze_mesh(&m_degen);
+        assert!(rep_degen.degenerate_faces >= 1);
+
+        let m_clean = remove_degenerate_faces(&m_degen);
+        let rep_clean = analyze_mesh(&m_clean);
+        assert_eq!(rep_clean.degenerate_faces, 0);
+
+        // 3. Normal unification
+        let mut flipped_idx = m.indices.clone();
+        // Invert triangle 0
+        flipped_idx.swap(1, 2);
+        let m_flipped = Mesh::from_indexed(m.positions.clone(), flipped_idx);
+        let rep_flipped = analyze_mesh(&m_flipped);
+        assert!(rep_flipped.inconsistent_normals > 0);
+
+        let m_unified = unify_normals(&m_flipped);
+        let rep_unified = analyze_mesh(&m_unified);
+        assert_eq!(rep_unified.inconsistent_normals, 0);
+
+        // 4. Floating debris removal
+        let mut pos_debris = m.positions.clone();
+        let mut idx_debris = m.indices.clone();
+        // Add a tiny detached triangle far away
+        let d0 = pos_debris.len() as u32;
+        pos_debris.push([100.0, 100.0, 100.0]);
+        pos_debris.push([101.0, 100.0, 100.0]);
+        pos_debris.push([100.0, 101.0, 100.0]);
+        idx_debris.push(d0);
+        idx_debris.push(d0 + 1);
+        idx_debris.push(d0 + 2);
+
+        let m_with_debris = Mesh::from_indexed(pos_debris, idx_debris);
+        let rep_deb = analyze_mesh(&m_with_debris);
+        assert_eq!(rep_deb.component_count, 2);
+
+        let m_no_debris = remove_small_components(&m_with_debris, false, 0.05);
+        let rep_no_deb = analyze_mesh(&m_no_debris);
+        assert_eq!(rep_no_deb.component_count, 1);
+
+        // 5. 1-Click Auto Repair Pipeline
+        let (repaired, summary) = auto_repair_mesh(&m_with_debris);
+        assert!(summary.contains("Auto Repair complete"));
+        let rep_final = analyze_mesh(&repaired);
+        assert_eq!(rep_final.component_count, 1);
+        assert_eq!(rep_final.degenerate_faces, 0);
+    }
 }
+
