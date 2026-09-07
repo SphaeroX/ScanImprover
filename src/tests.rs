@@ -525,17 +525,21 @@ mod tests {
         assert_eq!(app.sym_pick.len(), 1);
         assert_eq!(app.mode, Mode::SymPickLine);
 
-        // Place point 2 -> triggers transition to Mode::Orbit
+        // Place point 2 -> triggers transition to Mode::Orbit and schedules symmetry calculation
         let p2 = Vec3::new(1.0, 0.0, 1.0);
         app.sym_pick.push(p2);
         app.suppress_sel_drag = true;
         if app.sym_pick.len() >= 2 {
+            let a = app.sym_pick[0];
+            let b = app.sym_pick[1];
+            app.schedule_sym_from_line(a, b);
             app.mode = Mode::Orbit;
         }
 
-        // Mode is now Orbit, 2 points stored
+        // Mode is now Orbit, 2 points stored, sym job submitted
         assert_eq!(app.mode, Mode::Orbit);
         assert_eq!(app.sym_pick.len(), 2);
+        assert!(app.sym_job.is_some());
 
         // While mouse is still held down from point 2 click, suppress_sel_drag is true:
         assert!(app.suppress_sel_drag);
@@ -1173,6 +1177,27 @@ mod tests {
         // With previous broken cylinder code, this returned 0.0. Now it returns 20.0!
         let dist_above = ref_circle.distance_to_point(glam::Vec3::new(0.0, 0.0, 20.0));
         assert!((dist_above - 20.0).abs() < 1e-4, "Expected distance 20.0, got {}", dist_above);
+    }
+
+    #[test]
+    fn brush_radius_adjustment_and_clamping() {
+        let mut app = crate::app::App::new();
+        assert_eq!(app.brush_radius, 25.0);
+
+        // Increase brush size by steps
+        let steps = 5.0f32;
+        app.brush_radius = (app.brush_radius + steps * 3.0).clamp(2.0, 150.0);
+        assert_eq!(app.brush_radius, 40.0);
+
+        // Decrease brush size beyond min clamp
+        let steps_neg = -20.0f32;
+        app.brush_radius = (app.brush_radius + steps_neg * 3.0).clamp(2.0, 150.0);
+        assert_eq!(app.brush_radius, 2.0);
+
+        // Increase brush size beyond max clamp
+        let steps_large = 100.0f32;
+        app.brush_radius = (app.brush_radius + steps_large * 3.0).clamp(2.0, 150.0);
+        assert_eq!(app.brush_radius, 150.0);
     }
 }
 

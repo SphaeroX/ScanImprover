@@ -1732,11 +1732,10 @@ impl App {
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let hint: String = match self.mode {
-                Mode::Orbit => "LMB drag = select · Shift+LMB = erase · RMB drag = orbit · MMB drag = pan · Ctrl+Wheel = expand/shrink · Wheel = zoom".to_string(),
+                Mode::Orbit => "LMB drag = select · Shift+LMB = erase · Alt+Wheel = brush size · Ctrl+Wheel = expand/shrink · RMB drag = orbit · MMB drag = pan · Wheel = zoom".to_string(),
                 Mode::SymPickLine => {
                     if self.sym_pick.len() >= 2 {
-                        "Symmetry line ready · Click 'Calculate' in Symmetry panel to compute · Esc = reset"
-                            .to_string()
+                        "Symmetry line ready · Esc = reset".to_string()
                     } else {
                         format!(
                             "Symmetry line: click point {} of 2 on the mesh · Esc = cancel",
@@ -1798,10 +1797,48 @@ impl App {
             self.camera.rotate(d.x, d.y);
         }
 
-        // Mouse Wheel: Ctrl + Wheel = Grow / Shrink selection (Meshmixer style), Wheel = Zoom
+        // Mouse Wheel: Alt + Wheel = Change Brush Size, Ctrl + Wheel = Grow / Shrink selection (Meshmixer style), Wheel = Zoom
         if response.hovered() && !is_navigating {
             let ctrl = ui.ctx().input(|i| i.modifiers.ctrl);
-            if ctrl {
+            let alt = ui.ctx().input(|i| i.modifiers.alt);
+            if alt {
+                let mut wheel_events: Vec<(egui::MouseWheelUnit, egui::Vec2)> = Vec::new();
+                let mut zoom_delta = 1.0f32;
+                ui.ctx().input(|i| {
+                    zoom_delta = i.zoom_delta();
+                    for event in &i.events {
+                        if let egui::Event::MouseWheel { unit, delta, .. } = event {
+                            wheel_events.push((*unit, *delta));
+                        }
+                    }
+                });
+
+                let mut triggered = false;
+                for (unit, delta) in wheel_events {
+                    match unit {
+                        egui::MouseWheelUnit::Line => {
+                            let steps = delta.y;
+                            if steps.abs() > 0.0 {
+                                self.brush_radius =
+                                    (self.brush_radius + steps * 3.0).clamp(2.0, 150.0);
+                                triggered = true;
+                            }
+                        }
+                        egui::MouseWheelUnit::Point | egui::MouseWheelUnit::Page => {
+                            self.brush_radius =
+                                (self.brush_radius + delta.y * 0.25).clamp(2.0, 150.0);
+                            triggered = true;
+                        }
+                    }
+                }
+                if !triggered {
+                    if zoom_delta > 1.01 {
+                        self.brush_radius = (self.brush_radius + 3.0).clamp(2.0, 150.0);
+                    } else if zoom_delta < 0.99 {
+                        self.brush_radius = (self.brush_radius - 3.0).clamp(2.0, 150.0);
+                    }
+                }
+            } else if ctrl {
                 let mut wheel_events: Vec<(egui::MouseWheelUnit, egui::Vec2)> = Vec::new();
                 let mut zoom_delta = 1.0f32;
                 ui.ctx().input(|i| {
@@ -1962,7 +1999,9 @@ impl App {
             }
         }
 
-        let hover_changed = self.hover_tris != new_hover_tris || self.hover_is_erase != shift;
+        let hover_changed = self.hover_tris != new_hover_tris
+            || self.hover_is_erase != shift
+            || (self.hover_radius_world - new_hover_r).abs() > 1e-4;
         self.hover_hit = new_hover_hit;
         self.hover_tris = new_hover_tris;
         self.hover_radius_world = new_hover_r;
@@ -2015,9 +2054,9 @@ impl App {
                 if self.sym_pick.len() == 1 {
                     self.status = "Point 1 placed. Click point 2 on the mesh.".to_string();
                 } else if self.sym_pick.len() == 2 {
-                    self.status =
-                        "Symmetry line drawn. Click 'Calculate' in Symmetry panel to compute."
-                            .to_string();
+                    let a = self.sym_pick[0];
+                    let b = self.sym_pick[1];
+                    self.schedule_sym_from_line(a, b);
                     self.mode = Mode::Orbit;
                 }
             }
