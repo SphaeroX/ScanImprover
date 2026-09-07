@@ -1127,6 +1127,7 @@ mod tests {
             center: glam::Vec3::ZERO,
             normal: glam::Vec3::Z,
             radius,
+            mode: crate::geom::hole_solver::CircleGuideMode::CylinderWall,
         };
 
         let ref_plane = ReferenceGeometry::Plane {
@@ -1145,6 +1146,33 @@ mod tests {
         let mut patch = generate_hole_patch(&mesh, small_hole, result.best_config).expect("Generate patch");
         refine_patch_to_references(&mut patch, &mesh, small_hole, &refs);
         assert!(!patch.new_positions.is_empty() || !patch.preview_positions.is_empty());
+    }
+
+    #[test]
+    fn test_hole_solver_circle_disk_and_rim_no_infinite_cylinder() {
+        use crate::geom::hole_solver::{ReferenceGeometry, CircleGuideMode};
+
+        let ref_circle = ReferenceGeometry::Circle {
+            id: 1,
+            name: "Test Circle".to_string(),
+            center: glam::Vec3::ZERO,
+            normal: glam::Vec3::Z,
+            radius: 10.0,
+            mode: CircleGuideMode::DiskAndRim,
+        };
+
+        // Point inside the circle on plane z=0
+        assert_eq!(ref_circle.distance_to_point(glam::Vec3::new(5.0, 0.0, 0.0)), 0.0);
+
+        // Point outside the circle on plane z=0 (at r=15)
+        // With previous broken cylinder code, this returned 0.0. Now it returns 5.0!
+        let dist_outside = ref_circle.distance_to_point(glam::Vec3::new(15.0, 0.0, 0.0));
+        assert!((dist_outside - 5.0).abs() < 1e-4, "Expected distance 5.0, got {}", dist_outside);
+
+        // Point 20 mm above the circle axis
+        // With previous broken cylinder code, this returned 0.0. Now it returns 20.0!
+        let dist_above = ref_circle.distance_to_point(glam::Vec3::new(0.0, 0.0, 20.0));
+        assert!((dist_above - 20.0).abs() < 1e-4, "Expected distance 20.0, got {}", dist_above);
     }
 }
 

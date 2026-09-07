@@ -137,6 +137,7 @@ pub struct App {
     pub(crate) repair_health: Option<crate::geom::repair::MeshHealthReport>,
     pub(crate) repair_refine_to_references: bool,
     pub(crate) repair_solve_status: Option<String>,
+    pub(crate) repair_circle_mode: crate::geom::hole_solver::CircleGuideMode,
 }
 
 impl App {
@@ -218,6 +219,7 @@ impl App {
             repair_health: None,
             repair_refine_to_references: false,
             repair_solve_status: None,
+            repair_circle_mode: crate::geom::hole_solver::CircleGuideMode::DiskAndRim,
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -1292,7 +1294,7 @@ impl App {
         }
         for c in &self.circles {
             if c.visible {
-                refs.push(crate::geom::hole_solver::ReferenceGeometry::from_circle(c));
+                refs.push(crate::geom::hole_solver::ReferenceGeometry::from_circle(c, self.repair_circle_mode));
             }
         }
         if refs.is_empty() {
@@ -1311,10 +1313,16 @@ impl App {
                     center: c.center,
                     normal: c.normal,
                     radius: c.radius,
+                    mode: self.repair_circle_mode,
                 });
             }
         }
         refs
+    }
+
+    pub(crate) fn set_hole_circle_mode(&mut self, mode: crate::geom::hole_solver::CircleGuideMode) {
+        self.repair_circle_mode = mode;
+        self.update_hole_preview();
     }
 
     pub(crate) fn solve_best_hole_fill(&mut self) {

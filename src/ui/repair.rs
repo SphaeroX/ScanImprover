@@ -27,6 +27,7 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     let mut do_fill_all = false;
     let mut do_solve_best = false;
     let mut new_refine: Option<bool> = None;
+    let mut new_circle_mode: Option<crate::geom::hole_solver::CircleGuideMode> = None;
     let mut do_unify_normals = false;
     let mut do_remove_debris = false;
     let mut do_remove_degenerates = false;
@@ -294,6 +295,35 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
             }
         });
 
+        if circle_count > 0 {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Circle Shape:").size(11.0));
+                let mut cm = app.repair_circle_mode;
+                if ui
+                    .selectable_value(
+                        &mut cm,
+                        crate::geom::hole_solver::CircleGuideMode::DiskAndRim,
+                        "Disk / Rim",
+                    )
+                    .on_hover_text("Treats circle as a planar disk and circular perimeter contour (prevents infinite cylinder projection)")
+                    .clicked()
+                {
+                    new_circle_mode = Some(cm);
+                }
+                if ui
+                    .selectable_value(
+                        &mut cm,
+                        crate::geom::hole_solver::CircleGuideMode::CylinderWall,
+                        "Cylinder Wall",
+                    )
+                    .on_hover_text("Treats circle as a cylindrical bore/wall")
+                    .clicked()
+                {
+                    new_circle_mode = Some(cm);
+                }
+            });
+        }
+
         ui.horizontal(|ui| {
             let solve_btn = ui.add_enabled(
                 has_refs && !holes_clone.is_empty(),
@@ -413,6 +443,9 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(r) = new_refine {
         app.set_hole_refine_to_references(r);
+    }
+    if let Some(cm) = new_circle_mode {
+        app.set_hole_circle_mode(cm);
     }
     if do_unify_normals {
         app.unify_normals_action();

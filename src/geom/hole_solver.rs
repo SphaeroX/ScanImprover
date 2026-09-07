@@ -1,10 +1,25 @@
-use glam::Vec3;
+﻿use glam::Vec3;
 use crate::geom::fitting::{FittedCircle, FittedPlane};
 use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_fill::{
     FillDirectionMode, HoleFillConfig, HoleFillMethod, MeshPatch, generate_hole_patch,
 };
 use crate::mesh::Mesh;
+
+/// Interpretation mode for a reference circle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CircleGuideMode {
+    /// Bounded circular disk and boundary rim (does not extend to infinite cylinder or plane).
+    DiskAndRim,
+    /// Cylindrical wall surface (localized to hole vicinity).
+    CylinderWall,
+}
+
+impl Default for CircleGuideMode {
+    fn default() -> Self {
+        Self::DiskAndRim
+    }
+}
 
 /// Represents a geometric reference feature that hole fills can be guided by.
 #[allow(dead_code)]
@@ -22,6 +37,7 @@ pub enum ReferenceGeometry {
         center: Vec3,
         normal: Vec3,
         radius: f32,
+        mode: CircleGuideMode,
     },
 }
 
@@ -35,13 +51,14 @@ impl ReferenceGeometry {
         }
     }
 
-    pub fn from_circle(circle: &FittedCircle) -> Self {
+    pub fn from_circle(circle: &FittedCircle, mode: CircleGuideMode) -> Self {
         Self::Circle {
             id: circle.id,
             name: circle.name.clone(),
             center: circle.fit.center,
             normal: circle.fit.normal.normalize_or_zero(),
             radius: circle.fit.radius,
+            mode,
         }
     }
 
@@ -61,15 +78,37 @@ impl ReferenceGeometry {
                 center,
                 normal,
                 radius,
+                mode,
                 ..
             } => {
                 let v = p - *center;
                 let h = v.dot(*normal);
                 let r_perp = v - *normal * h;
-                let radial_dist = (r_perp.length() - *radius).abs();
-                let plane_dist = h.abs();
-                // A circle can represent a cylindrical bore/boss or a planar circular face.
-                radial_dist.min(plane_dist)
+                let d_perp = r_perp.length();
+
+                match mode {
+                    CircleGuideMode::DiskAndRim => {
+                        if d_perp <= *radius {
+                            // Inside circular disk: perpendicular distance to disk plane
+                            h.abs()
+                        } else {
+                            // Outside circular disk: 3D distance to the circular boundary rim
+                            let dr = d_perp - *radius;
+                            (dr * dr + h * h).sqrt()
+                        }
+                    }
+                    CircleGuideMode::CylinderWall => {
+                        let dr = (d_perp - *radius).abs();
+                        // Cylinders in real parts are bounded in height (not infinite into infinity)
+                        let max_h = *radius * 2.0;
+                        if h.abs() <= max_h {
+                            dr
+                        } else {
+                            let dh = h.abs() - max_h;
+                            (dr * dr + dh * dh).sqrt()
+                        }
+                    }
+                }
             }
         }
     }
@@ -85,30 +124,38 @@ impl ReferenceGeometry {
                 center,
                 normal,
                 radius,
+                mode,
                 ..
             } => {
                 let v = p - *center;
                 let h = v.dot(*normal);
                 let r_perp = v - *normal * h;
-                let len = r_perp.length();
-                let radial_dist = (len - *radius).abs();
-                let plane_dist = h.abs();
-                if radial_dist < plane_dist {
-                    // Project onto cylinder surface
-                    let dir = if len > 1e-6 {
-                        r_perp / len
-                    } else {
-                        // Fallback orthogonal direction
-                        let mut ortho = Vec3::new(normal.y, -normal.x, 0.0);
-                        if ortho.length_squared() < 1e-6 {
-                            ortho = Vec3::new(0.0, normal.z, -normal.y);
-                        }
-                        ortho.normalize_or_zero()
-                    };
-                    *center + *normal * h + dir * *radius
+                let d_perp = r_perp.length();
+
+                let dir = if d_perp > 1e-6 {
+                    r_perp / d_perp
                 } else {
-                    // Project onto circle plane
-                    p - *normal * h
+                    let mut ortho = Vec3::new(normal.y, -normal.x, 0.0);
+                    if ortho.length_squared() < 1e-6 {
+                        ortho = Vec3::new(0.0, normal.z, -normal.y);
+                    }
+                    ortho.normalize_or_zero()
+                };
+
+                match mode {
+                    CircleGuideMode::DiskAndRim => {
+                        if d_perp <= *radius {
+                            // Project onto circular disk plane
+                            p - *normal * h
+                        } else {
+                            // Project onto circular perimeter rim
+                            *center + dir * *radius
+                        }
+                    }
+                    CircleGuideMode::CylinderWall => {
+                        // Project onto cylinder wall at height h
+                        *center + *normal * h + dir * *radius
+                    }
                 }
             }
         }
@@ -158,7 +205,8 @@ pub struct PatchEvaluation {
     pub score: f32,
 }
 
-/// Evaluates a candidate patch against the reference geometries.
+/// Evaluates a candidate patch against the reference geometries by sampling
+/// the true triangulated patch surface and interior vertices.
 pub fn evaluate_patch(patch: &MeshPatch, refs: &[ReferenceGeometry]) -> PatchEvaluation {
     if refs.is_empty() {
         return PatchEvaluation {
@@ -168,14 +216,37 @@ pub fn evaluate_patch(patch: &MeshPatch, refs: &[ReferenceGeometry]) -> PatchEva
         };
     }
 
-    // Evaluate newly introduced interior vertices if any; otherwise evaluate preview positions
-    let points = if !patch.new_positions.is_empty() {
-        &patch.new_positions
-    } else {
-        &patch.preview_positions
-    };
+    let mut sample_points = Vec::new();
 
-    if points.is_empty() {
+    // 1. Sample triangle centroids from preview mesh (represents the true triangulated surface)
+    let num_tris = patch.preview_indices.len() / 3;
+    for t in 0..num_tris {
+        let i0 = patch.preview_indices[t * 3] as usize;
+        let i1 = patch.preview_indices[t * 3 + 1] as usize;
+        let i2 = patch.preview_indices[t * 3 + 2] as usize;
+        if let (Some(&p0), Some(&p1), Some(&p2)) = (
+            patch.preview_positions.get(i0),
+            patch.preview_positions.get(i1),
+            patch.preview_positions.get(i2),
+        ) {
+            let c = (Vec3::from_array(p0) + Vec3::from_array(p1) + Vec3::from_array(p2)) / 3.0;
+            sample_points.push(c);
+        }
+    }
+
+    // 2. Also include newly added interior vertices
+    for pos in &patch.new_positions {
+        sample_points.push(Vec3::from_array(*pos));
+    }
+
+    // Fallback if no triangles or vertices
+    if sample_points.is_empty() {
+        for pos in &patch.preview_positions {
+            sample_points.push(Vec3::from_array(*pos));
+        }
+    }
+
+    if sample_points.is_empty() {
         return PatchEvaluation {
             rms: 0.0,
             max_dev: 0.0,
@@ -185,8 +256,7 @@ pub fn evaluate_patch(patch: &MeshPatch, refs: &[ReferenceGeometry]) -> PatchEva
 
     let mut sum_sq = 0.0;
     let mut max_dev: f32 = 0.0;
-    for pt in points {
-        let p = Vec3::from_array(*pt);
+    for &p in &sample_points {
         let d = distance_to_references(p, refs);
         sum_sq += d * d;
         if d > max_dev {
@@ -194,7 +264,7 @@ pub fn evaluate_patch(patch: &MeshPatch, refs: &[ReferenceGeometry]) -> PatchEva
         }
     }
 
-    let rms = (sum_sq / points.len() as f32).sqrt();
+    let rms = (sum_sq / sample_points.len() as f32).sqrt();
     let score = rms + 0.15 * max_dev;
     PatchEvaluation { rms, max_dev, score }
 }
@@ -273,29 +343,7 @@ pub fn solve_best_hole_config(
         }
     }
 
-    // 3. Evaluate and optimize Planar Fan across bulge values
-    let fan_bulges = [-0.8, -0.5, -0.3, -0.15, 0.0, 0.15, 0.3, 0.5, 0.8];
-    for &dir in &test_directions {
-        for &bulge in &fan_bulges {
-            let cfg = HoleFillConfig {
-                method: HoleFillMethod::PlanarFan,
-                density: 1.0,
-                bulge,
-                direction_mode: dir,
-                smooth_iterations: 15,
-            };
-            if let Ok(patch) = generate_hole_patch(mesh, hole, cfg) {
-                tested_count += 1;
-                let ev = evaluate_patch(&patch, refs);
-                if ev.score < best_eval.score {
-                    best_eval = ev;
-                    best_config = cfg;
-                }
-            }
-        }
-    }
-
-    // 4. Evaluate and optimize Liepa Smooth across bulge, directions, and iterations
+    // 3. Evaluate and optimize Liepa Smooth across bulge, directions, and iterations
     let liepa_bulges = [-0.6, -0.4, -0.2, -0.1, 0.0, 0.1, 0.2, 0.4, 0.6];
     for &dir in &test_directions {
         for &bulge in &liepa_bulges {
@@ -319,9 +367,34 @@ pub fn solve_best_hole_config(
         }
     }
 
-    // Fine-tune bulge for the winning configuration if it supports continuous bulge
-    if best_config.method == HoleFillMethod::PlanarFan
-        || best_config.method == HoleFillMethod::LiepaSmooth
+    // 4. Evaluate Planar Fan across modest bulge values with topology regularization penalty
+    let fan_bulges = [-0.4, -0.2, 0.0, 0.2, 0.4];
+    for &dir in &test_directions {
+        for &bulge in &fan_bulges {
+            let cfg = HoleFillConfig {
+                method: HoleFillMethod::PlanarFan,
+                density: 1.0,
+                bulge,
+                direction_mode: dir,
+                smooth_iterations: 15,
+            };
+            if let Ok(patch) = generate_hole_patch(mesh, hole, cfg) {
+                tested_count += 1;
+                let ev = evaluate_patch(&patch, refs);
+                // PlanarFan creates a single-vertex star fan with poor needle-triangle topology,
+                // so we add a 25% regularization penalty compared to smooth fairing.
+                let penalized_score = ev.score * 1.25;
+                if penalized_score < best_eval.score {
+                    best_eval = ev;
+                    best_config = cfg;
+                }
+            }
+        }
+    }
+
+    // Fine-tune bulge for the winning configuration if LiepaSmooth or PlanarFan
+    if best_config.method == HoleFillMethod::LiepaSmooth
+        || best_config.method == HoleFillMethod::PlanarFan
     {
         let center_bulge = best_config.bulge;
         let deltas = [-0.08, -0.04, 0.04, 0.08];
@@ -332,7 +405,12 @@ pub fn solve_best_hole_config(
             if let Ok(patch) = generate_hole_patch(mesh, hole, cfg) {
                 tested_count += 1;
                 let ev = evaluate_patch(&patch, refs);
-                if ev.score < best_eval.score {
+                let score = if cfg.method == HoleFillMethod::PlanarFan {
+                    ev.score * 1.25
+                } else {
+                    ev.score
+                };
+                if score < best_eval.score {
                     best_eval = ev;
                     best_config = cfg;
                 }
