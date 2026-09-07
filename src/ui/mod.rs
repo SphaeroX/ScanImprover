@@ -12,11 +12,11 @@ use eframe::egui;
 /// Available sections in the left accordion menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolSection {
-    Decimation,
     Symmetry,
     Selection,
     Coordinates,
     Repair,
+    Decimation,
 }
 
 /// Renders the complete left panel with the accordion sections.
@@ -28,28 +28,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        // Section 1: Decimation
-        let dec_badge = if app.preview.is_some() {
-            Some("Preview active")
-        } else {
-            None
-        };
-        let dec_open = app.active_section == Some(ToolSection::Decimation);
-        if accordion_header(ui, "Decimation", dec_open, dec_badge) {
-            app.active_section = if dec_open {
-                None
-            } else {
-                Some(ToolSection::Decimation)
-            };
-        }
-        if dec_open {
-            accordion_body(ui, |ui| {
-                sections::render_decimation(app, ui);
-            });
-        }
-        ui.add_space(3.0);
-
-        // Section 2: Symmetry plane
+        // Section 1: Symmetry plane
         let sym_badge = if app.sym.is_some() {
             Some("Plane active")
         } else {
@@ -70,7 +49,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 3: Face selection
+        // Section 2: Face selection
         let sel_badge_str = if app.sel_count > 0 {
             Some(format!("{} faces", app.sel_count))
         } else {
@@ -91,7 +70,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 4: Coordinate system
+        // Section 3: Coordinate system
         let coord_badge_str = if !app.undo.is_empty() {
             Some(format!("{} undos", app.undo.len()))
         } else {
@@ -117,7 +96,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 5: Mesh repair
+        // Section 4: Mesh repair
         let repair_badge_str = if !app.repair_holes.is_empty() {
             Some(format!("{} holes", app.repair_holes.len()))
         } else if let Some(h) = &app.repair_health {
@@ -145,6 +124,27 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         if repair_open {
             accordion_body(ui, |ui| {
                 repair::render_repair(app, ui);
+            });
+        }
+        ui.add_space(3.0);
+
+        // Section 5: Decimation
+        let dec_badge = if app.preview.is_some() {
+            Some("Preview active")
+        } else {
+            None
+        };
+        let dec_open = app.active_section == Some(ToolSection::Decimation);
+        if accordion_header(ui, "Decimation", dec_open, dec_badge) {
+            app.active_section = if dec_open {
+                None
+            } else {
+                Some(ToolSection::Decimation)
+            };
+        }
+        if dec_open {
+            accordion_body(ui, |ui| {
+                sections::render_decimation(app, ui);
             });
         }
         ui.add_space(6.0);

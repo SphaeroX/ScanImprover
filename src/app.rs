@@ -209,7 +209,7 @@ impl App {
             hover_is_erase: false,
             wheel_accum: 0.0,
             suppress_sel_drag: false,
-            active_section: Some(crate::ui::ToolSection::Decimation),
+            active_section: None,
             align_slots: crate::geom::alignment::AlignmentSlots::default(),
             repair_holes: Vec::new(),
             repair_selected_hole: None,
