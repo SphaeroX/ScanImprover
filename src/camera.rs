@@ -113,4 +113,50 @@ impl Camera {
         let dir = -self.back() + self.right() * (ndc_x * t * self.aspect) + self.up() * (ndc_y * t);
         (self.eye(), dir.normalize_or_zero())
     }
+
+    /// Computes key and fill directional light vectors in world space relative to the camera frame.
+    /// This ensures surfaces facing the camera are always well illuminated regardless of view angle.
+    pub fn light_directions(&self) -> (Vec3, Vec3) {
+        let back = self.back();
+        let right = self.right();
+        let up = self.up();
+        let l1 = (back * 0.75 + right * 0.35 + up * 0.55).normalize();
+        let l2 = (back * 0.45 - right * 0.40 - up * 0.30).normalize();
+        (l1, l2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_camera_light_directions_follow_orientation() {
+        let mut cam = Camera::default();
+
+        // Check default ISO orientation
+        let (l1, l2) = cam.light_directions();
+        assert!((l1.length() - 1.0).abs() < 1e-5);
+        assert!((l2.length() - 1.0).abs() < 1e-5);
+        assert!(l1.dot(cam.back()) > 0.0, "Key light must shine from the camera's viewing hemisphere");
+        assert!(l2.dot(cam.back()) > 0.0, "Fill light must shine from the camera's viewing hemisphere");
+
+        // Pitch camera down (looking at bottom / underside of object)
+        cam.rotate(0.0, 50.0);
+        let (l1_down, l2_down) = cam.light_directions();
+        assert!((l1_down.length() - 1.0).abs() < 1e-5);
+        assert!((l2_down.length() - 1.0).abs() < 1e-5);
+        assert!(l1_down.dot(cam.back()) > 0.0);
+        assert!(l2_down.dot(cam.back()) > 0.0);
+        // Ensure the light directions actually changed in world space to follow the camera
+        assert!((l1_down - l1).length() > 0.1);
+
+        // Explicit views
+        for dir in [ViewDir::X, ViewDir::Y, ViewDir::Z, ViewDir::Iso] {
+            cam.set_view(dir);
+            let (l1, l2) = cam.light_directions();
+            assert!(l1.dot(cam.back()) > 0.5, "Key light stays oriented with view direction");
+            assert!(l2.dot(cam.back()) > 0.3, "Fill light stays oriented with view direction");
+        }
+    }
 }

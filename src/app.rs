@@ -2318,9 +2318,12 @@ impl App {
                         self.aux_dirty = false;
                     }
                 }
+                let (light1, light2) = self.camera.light_directions();
                 gpu.set_frame(
                     self.camera.view_proj(),
                     self.camera.eye(),
+                    light1,
+                    light2,
                     self.heat_on && self.heat.is_some(),
                     if self.heat_on && self.heat_max > 0.0 {
                         1.0 / self.heat_max

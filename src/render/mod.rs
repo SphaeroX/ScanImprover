@@ -8,6 +8,8 @@ struct Uniforms {
     viewproj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     params: vec4<f32>,
+    light1: vec4<f32>,
+    light2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
 
@@ -50,8 +52,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = normalize(U.cam_pos.xyz - in.wp);
     var n = normalize(in.nrm);
     n = select(-n, n, dot(n, v) >= 0.0);
-    let l1 = normalize(vec3<f32>(0.35, 0.85, 0.40));
-    let l2 = normalize(vec3<f32>(-0.60, 0.15, -0.75));
+    let l1 = normalize(U.light1.xyz);
+    let l2 = normalize(U.light2.xyz);
     let diff = 0.15 + 0.60 * max(dot(n, l1), 0.0) + 0.35 * max(dot(n, l2), 0.0);
     let h1 = normalize(l1 + v);
     let spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
@@ -75,6 +77,8 @@ struct Uniforms {
     viewproj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     params: vec4<f32>,
+    light1: vec4<f32>,
+    light2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
 
@@ -133,6 +137,8 @@ struct Uniforms {
     viewproj: [[f32; 4]; 4],
     cam_pos: [f32; 4],
     params: [f32; 4],
+    light1: [f32; 4],
+    light2: [f32; 4],
 }
 
 struct MeshGpu {
@@ -609,6 +615,8 @@ impl GpuState {
         &mut self,
         viewproj: Mat4,
         cam_pos: Vec3,
+        light1: Vec3,
+        light2: Vec3,
         heat_on: bool,
         heat_scale: f32,
         show_mesh: bool,
@@ -618,6 +626,8 @@ impl GpuState {
             viewproj: viewproj.to_cols_array_2d(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
             params: [if heat_on { 1.0 } else { 0.0 }, heat_scale, 0.0, 0.0],
+            light1: [light1.x, light1.y, light1.z, 0.0],
+            light2: [light2.x, light2.y, light2.z, 0.0],
         };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
