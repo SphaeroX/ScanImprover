@@ -1022,5 +1022,129 @@ mod tests {
         assert_eq!(rep_final.component_count, 1);
         assert_eq!(rep_final.degenerate_faces, 0);
     }
+
+    #[test]
+    fn test_hole_solver_planar_guidance() {
+        use crate::geom::hole_detect::detect_holes;
+        use crate::geom::hole_solver::{solve_best_hole_config, ReferenceGeometry};
+
+        // Create a planar ring (flat surface on z = 0 with a central hole)
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        let n = 12;
+        let r_inner = 5.0f32;
+        let r_outer = 10.0f32;
+
+        for i in 0..n {
+            let theta = (i as f32 / n as f32) * std::f32::consts::TAU;
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+            positions.push([cos_t * r_inner, sin_t * r_inner, 0.0]);
+            positions.push([cos_t * r_outer, sin_t * r_outer, 0.0]);
+        }
+
+        for i in 0..n {
+            let i_next = (i + 1) % n;
+            let in_curr = (i * 2) as u32;
+            let out_curr = (i * 2 + 1) as u32;
+            let in_next = (i_next * 2) as u32;
+            let out_next = (i_next * 2 + 1) as u32;
+
+            indices.push(in_curr);
+            indices.push(out_curr);
+            indices.push(out_next);
+
+            indices.push(in_curr);
+            indices.push(out_next);
+            indices.push(in_next);
+        }
+
+        let mesh = Mesh::from_indexed(positions, indices);
+        let holes = detect_holes(&mesh);
+        assert!(!holes.is_empty());
+
+        let inner_hole = holes.iter().find(|h| h.perimeter < 40.0).expect("Inner hole");
+
+        let ref_plane = ReferenceGeometry::Plane {
+            id: 1,
+            name: "Z-Plane".to_string(),
+            point: glam::Vec3::ZERO,
+            normal: glam::Vec3::Z,
+        };
+
+        let result = solve_best_hole_config(&mesh, inner_hole, &[ref_plane]).expect("Solver succeeds");
+        assert!(result.rms_error < 1e-3, "RMS error should be virtually zero on plane, got {}", result.rms_error);
+        assert!(result.tested_count > 10, "Should have tested multiple candidate configurations");
+    }
+
+    #[test]
+    fn test_hole_solver_cylinder_and_multi_reference() {
+        use crate::geom::hole_detect::detect_holes;
+        use crate::geom::hole_solver::{solve_best_hole_config, refine_patch_to_references, ReferenceGeometry};
+        use crate::geom::hole_fill::generate_hole_patch;
+
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        let radius = 10.0f32;
+        let n_circ = 16;
+        let n_height = 4;
+
+        for h in 0..n_height {
+            let z = h as f32 * 5.0;
+            for i in 0..n_circ {
+                let theta = (i as f32 / n_circ as f32) * std::f32::consts::PI;
+                positions.push([radius * theta.cos(), radius * theta.sin(), z]);
+            }
+        }
+
+        for h in 0..(n_height - 1) {
+            for i in 0..(n_circ - 1) {
+                if h == 1 && (i == 7 || i == 8) {
+                    continue;
+                }
+                let v0 = (h * n_circ + i) as u32;
+                let v1 = (h * n_circ + i + 1) as u32;
+                let v2 = ((h + 1) * n_circ + i + 1) as u32;
+                let v3 = ((h + 1) * n_circ + i) as u32;
+
+                indices.push(v0);
+                indices.push(v1);
+                indices.push(v2);
+
+                indices.push(v0);
+                indices.push(v2);
+                indices.push(v3);
+            }
+        }
+
+        let mesh = Mesh::from_indexed(positions, indices);
+        let holes = detect_holes(&mesh);
+        assert!(!holes.is_empty());
+
+        let ref_circle = ReferenceGeometry::Circle {
+            id: 2,
+            name: "Cylindrical Bore".to_string(),
+            center: glam::Vec3::ZERO,
+            normal: glam::Vec3::Z,
+            radius,
+        };
+
+        let ref_plane = ReferenceGeometry::Plane {
+            id: 1,
+            name: "Top Face".to_string(),
+            point: glam::Vec3::new(0.0, 0.0, 15.0),
+            normal: glam::Vec3::Z,
+        };
+
+        let refs = vec![ref_plane, ref_circle.clone()];
+        let small_hole = holes.iter().min_by(|a, b| a.perimeter.partial_cmp(&b.perimeter).unwrap()).unwrap();
+
+        let result = solve_best_hole_config(&mesh, small_hole, &refs).expect("Solve succeeds");
+        assert!(result.tested_count > 0);
+
+        let mut patch = generate_hole_patch(&mesh, small_hole, result.best_config).expect("Generate patch");
+        refine_patch_to_references(&mut patch, &mesh, small_hole, &refs);
+        assert!(!patch.new_positions.is_empty() || !patch.preview_positions.is_empty());
+    }
 }
 

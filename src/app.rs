@@ -135,6 +135,8 @@ pub struct App {
     pub(crate) repair_preview_active: bool,
     pub(crate) repair_preview_patch: Option<crate::geom::hole_fill::MeshPatch>,
     pub(crate) repair_health: Option<crate::geom::repair::MeshHealthReport>,
+    pub(crate) repair_refine_to_references: bool,
+    pub(crate) repair_solve_status: Option<String>,
 }
 
 impl App {
@@ -214,6 +216,8 @@ impl App {
             repair_preview_active: true,
             repair_preview_patch: None,
             repair_health: None,
+            repair_refine_to_references: false,
+            repair_solve_status: None,
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -1279,6 +1283,89 @@ impl App {
         }
     }
 
+    pub(crate) fn active_reference_geometries(&self) -> Vec<crate::geom::hole_solver::ReferenceGeometry> {
+        let mut refs = Vec::new();
+        for p in &self.planes {
+            if p.visible {
+                refs.push(crate::geom::hole_solver::ReferenceGeometry::from_plane(p));
+            }
+        }
+        for c in &self.circles {
+            if c.visible {
+                refs.push(crate::geom::hole_solver::ReferenceGeometry::from_circle(c));
+            }
+        }
+        if refs.is_empty() {
+            if let Some(p) = self.plane {
+                refs.push(crate::geom::hole_solver::ReferenceGeometry::Plane {
+                    id: 0,
+                    name: "Active Plane".to_string(),
+                    point: p.point,
+                    normal: p.normal,
+                });
+            }
+            if let Some(c) = self.circle {
+                refs.push(crate::geom::hole_solver::ReferenceGeometry::Circle {
+                    id: 0,
+                    name: "Active Circle".to_string(),
+                    center: c.center,
+                    normal: c.normal,
+                    radius: c.radius,
+                });
+            }
+        }
+        refs
+    }
+
+    pub(crate) fn solve_best_hole_fill(&mut self) {
+        let refs = self.active_reference_geometries();
+        if refs.is_empty() {
+            self.status = "No fitted planes or circles available to guide hole fill.".to_string();
+            self.repair_solve_status = Some("No planes/circles available to guide solver.".to_string());
+            return;
+        }
+
+        let m_opt = self.display().cloned();
+        let hole_opt = self
+            .repair_selected_hole
+            .and_then(|idx| self.repair_holes.get(idx).cloned())
+            .or_else(|| self.repair_holes.first().cloned());
+
+        if let (Some(m), Some(hole)) = (m_opt, hole_opt) {
+            match crate::geom::hole_solver::solve_best_hole_config(&m, &hole, &refs) {
+                Ok(result) => {
+                    self.repair_config = result.best_config;
+                    self.repair_solve_status = Some(format!(
+                        "✓ Solved: {} (bulge: {:.2}, RMS: {:.3} mm)",
+                        result.best_method.display_name(),
+                        result.best_config.bulge,
+                        result.rms_error
+                    ));
+                    self.status = format!(
+                        "Solver selected {} (bulge: {:.2}, dir: {}, tested {} configs).",
+                        result.best_method.display_name(),
+                        result.best_config.bulge,
+                        result.best_config.direction_mode.display_name(),
+                        result.tested_count
+                    );
+                    self.update_hole_preview();
+                }
+                Err(e) => {
+                    self.status = format!("Solver error: {e}");
+                    self.repair_solve_status = Some(format!("Solver error: {e}"));
+                }
+            }
+        } else {
+            self.status = "No holes detected to solve.".to_string();
+            self.repair_solve_status = Some("No holes detected".to_string());
+        }
+    }
+
+    pub(crate) fn set_hole_refine_to_references(&mut self, refine: bool) {
+        self.repair_refine_to_references = refine;
+        self.update_hole_preview();
+    }
+
     pub(crate) fn update_hole_preview(&mut self) {
         if !self.repair_preview_active {
             self.repair_preview_patch = None;
@@ -1291,7 +1378,13 @@ impl App {
 
         if let (Some(m), Some(hole)) = (m_opt, hole_opt) {
             match crate::geom::hole_fill::generate_hole_patch(&m, &hole, self.repair_config) {
-                Ok(patch) => self.repair_preview_patch = Some(patch),
+                Ok(mut patch) => {
+                    if self.repair_refine_to_references {
+                        let refs = self.active_reference_geometries();
+                        crate::geom::hole_solver::refine_patch_to_references(&mut patch, &m, &hole, &refs);
+                    }
+                    self.repair_preview_patch = Some(patch);
+                }
                 Err(e) => {
                     self.status = format!("Preview error: {e}");
                     self.repair_preview_patch = None;
@@ -1307,12 +1400,24 @@ impl App {
             if let Some(hole) = self.repair_holes.get(idx).cloned() {
                 if let Some(curr) = self.current.clone() {
                     match crate::geom::hole_fill::generate_hole_patch(&curr, &hole, self.repair_config) {
-                        Ok(patch) => {
+                        Ok(mut patch) => {
+                            if self.repair_refine_to_references {
+                                let refs = self.active_reference_geometries();
+                                crate::geom::hole_solver::refine_patch_to_references(&mut patch, &curr, &hole, &refs);
+                            }
                             self.push_snapshot();
                             let mut next_mesh = (*curr).clone();
                             crate::geom::hole_fill::apply_patch(&mut next_mesh, &patch);
                             let method_name = self.repair_config.method.display_name();
-                            self.set_mesh_modified(next_mesh, format!("Hole #{} filled using {}.", hole.id, method_name));
+                            let refined_suffix = if self.repair_refine_to_references {
+                                " [CAD-refined]"
+                            } else {
+                                ""
+                            };
+                            self.set_mesh_modified(
+                                next_mesh,
+                                format!("Hole #{} filled using {}{}.", hole.id, method_name, refined_suffix),
+                            );
                         }
                         Err(e) => self.status = format!("Failed to fill hole: {e}"),
                     }
@@ -1327,14 +1432,36 @@ impl App {
             return;
         }
         if let Some(curr) = self.current.clone() {
-            match crate::geom::hole_fill::fill_holes(&curr, &self.repair_holes, self.repair_config) {
-                Ok(next_mesh) => {
-                    self.push_snapshot();
-                    let count = self.repair_holes.len();
-                    let method_name = self.repair_config.method.display_name();
-                    self.set_mesh_modified(next_mesh, format!("Filled all {count} holes using {}.", method_name));
+            let refs = if self.repair_refine_to_references {
+                self.active_reference_geometries()
+            } else {
+                Vec::new()
+            };
+
+            let mut working = (*curr).clone();
+            let mut filled_count = 0;
+            for hole in &self.repair_holes {
+                match crate::geom::hole_fill::generate_hole_patch(&working, hole, self.repair_config) {
+                    Ok(mut patch) => {
+                        if self.repair_refine_to_references && !refs.is_empty() {
+                            crate::geom::hole_solver::refine_patch_to_references(&mut patch, &working, hole, &refs);
+                        }
+                        crate::geom::hole_fill::apply_patch(&mut working, &patch);
+                        filled_count += 1;
+                    }
+                    Err(_) => {}
                 }
-                Err(e) => self.status = format!("Failed to fill all holes: {e}"),
+            }
+
+            if filled_count > 0 {
+                self.push_snapshot();
+                let method_name = self.repair_config.method.display_name();
+                self.set_mesh_modified(
+                    working,
+                    format!("Filled {}/{} holes using {}.", filled_count, self.repair_holes.len(), method_name),
+                );
+            } else {
+                self.status = "Failed to fill holes.".to_string();
             }
         }
     }

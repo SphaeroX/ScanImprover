@@ -25,6 +25,8 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     let mut new_preview_active: Option<bool> = None;
     let mut do_fill_selected = false;
     let mut do_fill_all = false;
+    let mut do_solve_best = false;
+    let mut new_refine: Option<bool> = None;
     let mut do_unify_normals = false;
     let mut do_remove_debris = false;
     let mut do_remove_degenerates = false;
@@ -261,6 +263,70 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
         ui.separator();
         ui.add_space(2.0);
 
+        // Reference Guidance & Numerical Solver
+        let plane_count = app.planes.iter().filter(|p| p.visible).count()
+            + (if app.planes.is_empty() && app.plane.is_some() { 1 } else { 0 });
+        let circle_count = app.circles.iter().filter(|c| c.visible).count()
+            + (if app.circles.is_empty() && app.circle.is_some() { 1 } else { 0 });
+        let has_refs = plane_count + circle_count > 0;
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Reference Guidance:").strong());
+            if has_refs {
+                let mut ref_desc = Vec::new();
+                if plane_count > 0 {
+                    ref_desc.push(format!("{} plane{}", plane_count, if plane_count == 1 { "" } else { "s" }));
+                }
+                if circle_count > 0 {
+                    ref_desc.push(format!("{} circle{}", circle_count, if circle_count == 1 { "" } else { "s" }));
+                }
+                ui.label(
+                    egui::RichText::new(format!("({} active)", ref_desc.join(", ")))
+                        .color(egui::Color32::from_rgb(100, 200, 255))
+                        .size(11.0),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("(No planes/circles fitted)")
+                        .color(egui::Color32::GRAY)
+                        .size(11.0),
+                );
+            }
+        });
+
+        ui.horizontal(|ui| {
+            let solve_btn = ui.add_enabled(
+                has_refs && !holes_clone.is_empty(),
+                egui::Button::new("🎯 Auto-Solve Best Fit"),
+            );
+            if solve_btn
+                .on_hover_text("Numerically solves for the optimal hole filling tool and parameters to best match existing fitted planes and circles")
+                .clicked()
+            {
+                do_solve_best = true;
+            }
+
+            let mut refine = app.repair_refine_to_references;
+            if ui.checkbox(&mut refine, "CAD Refine")
+                .on_hover_text("Projects interior patch vertices onto reference planes/cylinders with smooth boundary blend")
+                .changed()
+            {
+                new_refine = Some(refine);
+            }
+        });
+
+        if let Some(status_str) = &app.repair_solve_status {
+            ui.label(
+                egui::RichText::new(status_str)
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(120, 220, 140)),
+            );
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(2.0);
+
         if ui.checkbox(&mut preview_active, "Show preview in viewport").changed() {
             new_preview_active = Some(preview_active);
         }
@@ -341,6 +407,12 @@ pub fn render_repair(app: &mut App, ui: &mut egui::Ui) {
     }
     if do_fill_all {
         app.fill_all_holes();
+    }
+    if do_solve_best {
+        app.solve_best_hole_fill();
+    }
+    if let Some(r) = new_refine {
+        app.set_hole_refine_to_references(r);
     }
     if do_unify_normals {
         app.unify_normals_action();
