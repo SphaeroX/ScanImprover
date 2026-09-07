@@ -365,10 +365,14 @@ impl App {
         }
     }
 
-    fn load_file(&mut self, path: PathBuf) {
+    pub(crate) fn load_file(&mut self, path: PathBuf) {
         match std::fs::read(&path) {
             Ok(bytes) => match io::load_any(&path, &bytes) {
-                Ok(mesh) => {
+                Ok(mut mesh) => {
+                    let center = mesh.bbox().center();
+                    if center.length_squared() > 1e-10 {
+                        mesh.transform(Quat::IDENTITY, -center);
+                    }
                     let tris = mesh.triangle_count();
                     let verts = mesh.vertex_count();
                     let m = Arc::new(mesh);
@@ -406,7 +410,7 @@ impl App {
                     self.wire_dirty = true;
                     self.file_path = Some(path);
                     self.status = format!(
-                        "Loaded: {} triangles, {} vertices (welded). Units assumed mm.",
+                        "Loaded: {} triangles, {} vertices (welded). Centered at global origin.",
                         tris, verts
                     );
                 }

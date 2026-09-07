@@ -1199,5 +1199,30 @@ mod tests {
         app.brush_radius = (app.brush_radius + steps_large * 3.0).clamp(2.0, 150.0);
         assert_eq!(app.brush_radius, 150.0);
     }
+
+    #[test]
+    fn test_auto_center_on_import() {
+        let mut app = crate::app::App::new();
+        // Box from (10.0, 20.0, 30.0) to (14.0, 26.0, 38.0), center is (12.0, 23.0, 34.0)
+        let m = box_mesh(10.0, 20.0, 30.0, 4.0, 6.0, 8.0);
+        let bytes = crate::io::stl::save(&m, Path::new("offset_box"));
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("scanimprover_test_offset_box.stl");
+        std::fs::write(&temp_file, bytes).unwrap();
+
+        app.load_file(temp_file.clone());
+        let _ = std::fs::remove_file(&temp_file);
+
+        let center = app.bbox.center();
+        assert!(
+            center.length() < 1e-4,
+            "Mesh bbox center should be at (0,0,0) after import, was {:?}",
+            center
+        );
+        assert!(app.display().is_some());
+        assert!(app.current.is_some());
+        assert!(app.original.is_some());
+        assert!(app.status.contains("Centered at global origin"));
+    }
 }
 
