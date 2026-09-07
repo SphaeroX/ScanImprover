@@ -359,17 +359,27 @@ pub fn refine_symmetry_masked(
         return (*init, 0.0);
     }
     let c_fine = diag * 0.02;
+
+    let eval_loss = |p: [f64; 3]| {
+        let sp = plane_from_params(p[0], p[1], p[2], center);
+        robust_sym_loss(bvh, &samples, &sp, mask, c_fine)
+    };
+
+    // Multi-stage Nelder-Mead with restarts at decreasing step sizes
+    // Stage 1: Coarse exploration around initial plane
     let (t0, p0, d0) = params_from_plane(init, center);
-    let x = nelder_mead(
-        &|p: [f64; 3]| {
-            let sp = plane_from_params(p[0], p[1], p[2], center);
-            robust_sym_loss(bvh, &samples, &sp, mask, c_fine)
-        },
-        [t0, p0, d0],
-        [0.02, 0.02, (diag * 0.01) as f64],
-        240,
-    );
-    let final_plane = plane_from_params(x[0], x[1], x[2], center);
+    let step1 = [0.02, 0.02, (diag * 0.01) as f64];
+    let x1 = nelder_mead(&eval_loss, [t0, p0, d0], step1, 240);
+
+    // Stage 2: Intermediate refinement restart from Stage 1 result
+    let step2 = [0.005, 0.005, (diag * 0.002) as f64];
+    let x2 = nelder_mead(&eval_loss, x1, step2, 200);
+
+    // Stage 3: Fine micro-polish restart
+    let step3 = [0.001, 0.001, (diag * 0.0004) as f64];
+    let x3 = nelder_mead(&eval_loss, x2, step3, 160);
+
+    let final_plane = plane_from_params(x3[0], x3[1], x3[2], center);
     let rms = compute_sym_rms(bvh, &samples, &final_plane, mask, c_fine);
     (final_plane, rms)
 }
@@ -464,8 +474,7 @@ pub fn detect_symmetry_masked(
         }
     }
     best.map(|(plane, _)| {
-        let rms = compute_sym_rms(bvh, &fine, &plane, mask, c_fine);
-        (plane, rms)
+        refine_symmetry_masked(mesh, bvh, &plane, mask)
     })
 }
 
