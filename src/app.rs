@@ -4,6 +4,8 @@ use crate::geom::distance::Deviation;
 use crate::geom::fitting::{
     CircleFit, FittedCircle, FittedPlane, PlaneFit, fit_circle, fit_plane, plane_basis,
 };
+use crate::geom::freeform::{FittedFreeform, FreeformParams};
+use crate::geom::segment::{FaceGroup, GroupKind};
 use crate::geom::symmetry::SymPlane;
 use crate::io;
 use crate::mesh::{Aabb, Mesh};
@@ -30,6 +32,17 @@ pub(crate) const CIRCLE_COLORS: [[f32; 4]; 4] = [
     [0.4, 1.0, 0.5, 1.0],  // Mint
 ];
 
+pub(crate) const FREEFORM_COLORS: [[f32; 4]; 4] = [
+    [0.55, 0.45, 1.0, 0.9], // Violet
+    [0.35, 1.0, 0.55, 0.9], // Spring Green
+    [1.0, 0.5, 0.75, 0.9],  // Pink
+    [0.95, 0.75, 0.25, 0.9], // Gold
+];
+
+/// Maximum number of source points stored per freeform (fit input is
+/// sub-sampled to this so parameter changes can re-fit quickly).
+const FREEFORM_MAX_POINTS: usize = 96_000;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Orbit,
@@ -43,6 +56,27 @@ pub(crate) enum DecMode {
     Deviation,
 }
 
+/// Filter for the face group list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GroupFilter {
+    All,
+    Plane,
+    Cylinder,
+    Sphere,
+    Freeform,
+}
+
+/// True if a group of this kind passes the active list filter.
+pub(crate) fn group_matches_filter(kind: GroupKind, filter: GroupFilter) -> bool {
+    match filter {
+        GroupFilter::All => true,
+        GroupFilter::Plane => kind == GroupKind::Plane,
+        GroupFilter::Cylinder => kind == GroupKind::Cylinder,
+        GroupFilter::Sphere => kind == GroupKind::Sphere,
+        GroupFilter::Freeform => kind == GroupKind::Freeform,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     pub(crate) current: Arc<Mesh>,
@@ -53,8 +87,10 @@ pub(crate) struct Snapshot {
     pub(crate) circle: Option<CircleFit>,
     pub(crate) planes: Vec<FittedPlane>,
     pub(crate) circles: Vec<FittedCircle>,
+    pub(crate) freeforms: Vec<FittedFreeform>,
     pub(crate) selected_plane_id: Option<u64>,
     pub(crate) selected_circle_id: Option<u64>,
+    pub(crate) selected_freeform_id: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +142,10 @@ pub struct App {
     pub(crate) show_circle: bool,
     pub(crate) circles: Vec<FittedCircle>,
     pub(crate) selected_circle_id: Option<u64>,
+    pub(crate) freeforms: Vec<FittedFreeform>,
+    pub(crate) selected_freeform_id: Option<u64>,
+    /// (job id, freeform id) of the freeform fit currently running.
+    pub(crate) freeform_job: Option<(u64, u64)>,
     pub(crate) next_obj_id: u64,
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
@@ -121,6 +161,17 @@ pub struct App {
     pub(crate) wire_dirty: bool,
     pub(crate) expand_angle_deg: f32,
     pub(crate) topology: Option<Arc<crate::geom::topology::MeshTopology>>,
+    pub(crate) face_groups: Vec<FaceGroup>,
+    pub(crate) group_ids: Vec<i32>,
+    pub(crate) groups_show: bool,
+    pub(crate) groups_by_type: bool,
+    pub(crate) group_angle_deg: f32,
+    pub(crate) group_min_tris: f32,
+    pub(crate) group_fit_tol: f32,
+    pub(crate) groups_filter: GroupFilter,
+    pub(crate) selected_group: Option<i32>,
+    pub(crate) hover_group: Option<i32>,
+    pub(crate) group_sel_additive: bool,
     pub(crate) hover_hit: Option<pick::Hit>,
     pub(crate) hover_tris: Vec<u32>,
     pub(crate) hover_radius_world: f32,
@@ -187,6 +238,9 @@ impl App {
             show_circle: true,
             circles: Vec::new(),
             selected_circle_id: None,
+            freeforms: Vec::new(),
+            selected_freeform_id: None,
+            freeform_job: None,
             next_obj_id: 1,
             show_mesh: true,
             show_object_browser: true,
@@ -203,6 +257,17 @@ impl App {
             wire_dirty: false,
             expand_angle_deg: 45.0,
             topology: None,
+            face_groups: Vec::new(),
+            group_ids: Vec::new(),
+            groups_show: true,
+            groups_by_type: false,
+            group_angle_deg: 45.0,
+            group_min_tris: 2.0,
+            group_fit_tol: 0.0015,
+            groups_filter: GroupFilter::All,
+            selected_group: None,
+            hover_group: None,
+            group_sel_additive: true,
             hover_hit: None,
             hover_tris: Vec::new(),
             hover_radius_world: 0.0,
@@ -249,8 +314,10 @@ impl App {
                 circle: self.circle,
                 planes: self.planes.clone(),
                 circles: self.circles.clone(),
+                freeforms: self.freeforms.clone(),
                 selected_plane_id: self.selected_plane_id,
                 selected_circle_id: self.selected_circle_id,
+                selected_freeform_id: self.selected_freeform_id,
             });
             if self.undo.len() > 25 {
                 self.undo.remove(0);
@@ -271,8 +338,10 @@ impl App {
                     circle: self.circle,
                     planes: self.planes.clone(),
                     circles: self.circles.clone(),
+                    freeforms: self.freeforms.clone(),
                     selected_plane_id: self.selected_plane_id,
                     selected_circle_id: self.selected_circle_id,
+                    selected_freeform_id: self.selected_freeform_id,
                 });
                 if self.redo.len() > 25 {
                     self.redo.remove(0);
@@ -287,12 +356,16 @@ impl App {
             self.circle = s.circle;
             self.planes = s.planes;
             self.circles = s.circles;
+            self.freeforms = s.freeforms;
             self.selected_plane_id = s.selected_plane_id;
             self.selected_circle_id = s.selected_circle_id;
+            self.selected_freeform_id = s.selected_freeform_id;
+            self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
             self.bvh = None;
             self.topology = None;
+            self.invalidate_face_groups();
             self.hover_hit = None;
             self.hover_tris.clear();
             self.repair_holes.clear();
@@ -319,8 +392,10 @@ impl App {
                     circle: self.circle,
                     planes: self.planes.clone(),
                     circles: self.circles.clone(),
+                    freeforms: self.freeforms.clone(),
                     selected_plane_id: self.selected_plane_id,
                     selected_circle_id: self.selected_circle_id,
+                    selected_freeform_id: self.selected_freeform_id,
                 });
                 if self.undo.len() > 25 {
                     self.undo.remove(0);
@@ -335,12 +410,16 @@ impl App {
             self.circle = s.circle;
             self.planes = s.planes;
             self.circles = s.circles;
+            self.freeforms = s.freeforms;
             self.selected_plane_id = s.selected_plane_id;
             self.selected_circle_id = s.selected_circle_id;
+            self.selected_freeform_id = s.selected_freeform_id;
+            self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
             self.bvh = None;
             self.topology = None;
+            self.invalidate_face_groups();
             self.hover_hit = None;
             self.hover_tris.clear();
             self.repair_holes.clear();
@@ -386,6 +465,7 @@ impl App {
                     self.sel_count = 0;
                     self.bvh = None;
                     self.topology = None;
+                    self.invalidate_face_groups();
                     self.hover_hit = None;
                     self.hover_tris.clear();
                     self.deviation = None;
@@ -396,8 +476,11 @@ impl App {
                     self.circle = None;
                     self.planes.clear();
                     self.circles.clear();
+                    self.freeforms.clear();
                     self.selected_plane_id = None;
                     self.selected_circle_id = None;
+                    self.selected_freeform_id = None;
+                    self.freeform_job = None;
                     self.next_obj_id = 1;
                     self.repair_holes.clear();
                     self.repair_selected_hole = None;
@@ -454,6 +537,23 @@ impl App {
         for c in &mut self.circles {
             c.fit.center = rot * c.fit.center + trans;
             c.fit.normal = (rot * c.fit.normal).normalize();
+        }
+        for f in &mut self.freeforms {
+            if let Some(surf) = &mut f.surface {
+                surf.transform(rot, trans);
+            }
+            for p in Arc::make_mut(&mut f.source_points).iter_mut() {
+                *p = (rot * Vec3::from(*p) + trans).to_array();
+            }
+            for (a, b) in &mut f.boundary {
+                *a = (rot * Vec3::from(*a) + trans).to_array();
+                *b = (rot * Vec3::from(*b) + trans).to_array();
+            }
+        }
+        for g in &mut self.face_groups {
+            g.center = rot * g.center + trans;
+            g.point = rot * g.point + trans;
+            g.normal = (rot * g.normal).normalize_or_zero();
         }
         if let Some(p) = &mut self.plane {
             p.point = rot * p.point + trans;
@@ -514,6 +614,7 @@ impl App {
         self.sel_count = 0;
         self.bvh = None;
         self.topology = None;
+        self.invalidate_face_groups();
         self.hover_hit = None;
         self.hover_tris.clear();
         self.mesh_dirty = true;
@@ -552,7 +653,7 @@ impl App {
         }
     }
 
-    fn handle_worker(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_worker(&mut self, ctx: &egui::Context) {
         let results = self.worker.poll();
         for res in results {
             match res {
@@ -593,6 +694,13 @@ impl App {
                     if self.dec_job == Some(id) {
                         self.dec_job = None;
                     }
+                    if self.freeform_job.map(|(jid, _)| jid) == Some(id) {
+                        let (_, fid) = self.freeform_job.unwrap();
+                        self.freeform_job = None;
+                        if let Some(f) = self.freeforms.iter_mut().find(|f| f.id == fid) {
+                            f.refit_pending = false;
+                        }
+                    }
                     self.status = message;
                 }
                 JobResult::Deviation { id, dev, heat } => {
@@ -632,6 +740,73 @@ impl App {
                         self.bvh_job_mesh = None;
                         if matches {
                             self.bvh = Some(bvh);
+                        }
+                    }
+                }
+                JobResult::FreeformFit {
+                    id,
+                    freeform_id,
+                    data,
+                } => {
+                    if self.freeform_job.map(|(jid, _)| jid) == Some(id) {
+                        self.freeform_job = None;
+                        match data {
+                            Ok(d) => {
+                                let boundary =
+                                    crate::geom::freeform::boundary_segments(&d.surface);
+                                let (rms, max_dev, fold, count) =
+                                    (d.rms, d.max_dev, d.fold_ratio, d.point_count);
+                                let tris = d.surface.triangle_count();
+                                if let Some(f) = self
+                                    .freeforms
+                                    .iter_mut()
+                                    .find(|f| f.id == freeform_id)
+                                {
+                                    f.surface = Some(d.surface);
+                                    f.boundary = boundary;
+                                    f.rms = rms;
+                                    f.max_dev = max_dev;
+                                    f.fold_ratio = fold;
+                                    f.point_count = count;
+                                    let ov = f.params.overshoot_mm;
+                                    self.status = format!(
+                                        "Freeform surface fitted: {tris} triangles, RMS {rms:.4} mm, overshoot {ov:.2} mm."
+                                    );
+                                    if fold > 0.15 {
+                                        self.status.push_str(
+                                            " Note: the selection appears to wrap around; \
+                                             the fit may be inaccurate there.",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(message) => {
+                                self.status = format!("Freeform fit failed: {message}");
+                                if let Some(f) = self
+                                    .freeforms
+                                    .iter_mut()
+                                    .find(|f| f.id == freeform_id)
+                                {
+                                    f.refit_pending = false;
+                                }
+                            }
+                        }
+                        // Chained refits: the next freeform with pending
+                        // parameter changes gets the worker next.
+                        if let Some(next_id) = self
+                            .freeforms
+                            .iter()
+                            .find(|f| f.refit_pending)
+                            .map(|f| f.id)
+                        {
+                            if let Some(f) = self
+                                .freeforms
+                                .iter_mut()
+                                .find(|f| f.id == next_id)
+                            {
+                                f.refit_pending = false;
+                            }
+                            self.submit_freeform_fit(next_id);
                         }
                     }
                 }
@@ -814,14 +989,140 @@ impl App {
                 self.selected_circle_id = Some(id);
                 self.circle = Some(c);
                 self.show_circle = true;
-                self.status = format!(
-                    "Circle fitted: R = {:.4} mm, radial RMS {:.4} mm.",
-                    c.radius,
-                    c.radial_rms.sqrt()
-                );
+                self.status = if c.cylinder {
+                    format!(
+                        "Circle fitted as cylinder cross-section: R = {:.4} mm (D = {:.4} mm), radial RMS {:.4} mm.",
+                        c.radius,
+                        c.radius * 2.0,
+                        c.radial_rms.sqrt()
+                    )
+                } else {
+                    format!(
+                        "Circle fitted: R = {:.4} mm, radial RMS {:.4} mm.",
+                        c.radius,
+                        c.radial_rms.sqrt()
+                    )
+                };
             }
             Some(None) => self.status = "Circle fit failed on selection.".to_string(),
             None => self.status = "Select faces first.".to_string(),
+        }
+    }
+
+    /// Sub-sampled selection points for the freeform fitter.
+    fn selection_points_capped(&self, max_points: usize) -> Option<Vec<[f32; 3]>> {
+        let pts = self.selection_points()?;
+        if pts.len() > max_points {
+            let stride = pts.len().div_ceil(max_points);
+            Some(pts.iter().step_by(stride).copied().collect())
+        } else {
+            Some(pts)
+        }
+    }
+
+    /// Fits a freeform surface onto the current face selection.
+    pub(crate) fn fit_freeform_from_selection(&mut self) {
+        let Some(points) = self.selection_points_capped(FREEFORM_MAX_POINTS) else {
+            self.status = "Select faces first.".to_string();
+            return;
+        };
+        if points.len() < 12 {
+            self.status = "Selection too small for a freeform surface.".to_string();
+            return;
+        }
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for p in &points {
+            for k in 0..3 {
+                min[k] = min[k].min(p[k]);
+                max[k] = max[k].max(p[k]);
+            }
+        }
+        let extent = (max[0] - min[0])
+            .max(max[1] - min[1])
+            .max(max[2] - min[2])
+            .max(1e-6);
+
+        self.push_snapshot();
+        let id = self.next_obj_id;
+        self.next_obj_id += 1;
+        let col_idx = self.freeforms.len() % FREEFORM_COLORS.len();
+        let color = FREEFORM_COLORS[col_idx];
+        let name = format!("Freeform {}", self.freeforms.len() + 1);
+        self.freeforms.push(FittedFreeform {
+            id,
+            name,
+            visible: true,
+            color,
+            source_points: Arc::new(points),
+            params: FreeformParams::default_for(extent),
+            surface: None,
+            boundary: Vec::new(),
+            rms: 0.0,
+            max_dev: 0.0,
+            fold_ratio: 0.0,
+            point_count: 0,
+            refit_pending: false,
+        });
+        self.selected_freeform_id = Some(id);
+        self.status = "Fitting freeform surface…".to_string();
+        self.submit_freeform_fit(id);
+    }
+
+    fn submit_freeform_fit(&mut self, freeform_id: u64) {
+        if self.freeform_job.is_some() {
+            // One fit at a time; queue this one until the running fit lands.
+            if let Some(f) = self.freeforms.iter_mut().find(|f| f.id == freeform_id) {
+                f.refit_pending = true;
+            }
+            return;
+        }
+        let Some(f) = self.freeforms.iter().find(|f| f.id == freeform_id) else {
+            return;
+        };
+        let job = self
+            .worker
+            .submit_freeform_fit(freeform_id, f.source_points.clone(), f.params);
+        self.freeform_job = Some((job, freeform_id));
+    }
+
+    /// Re-fits a freeform after a parameter change. If a fit is already
+    /// running, the re-fit is queued and executed once it finishes.
+    pub(crate) fn schedule_freeform_refit(&mut self, freeform_id: u64) {
+        self.submit_freeform_fit(freeform_id);
+    }
+
+    pub(crate) fn set_freeform_params(&mut self, freeform_id: u64, params: FreeformParams) {
+        if let Some(f) = self.freeforms.iter_mut().find(|f| f.id == freeform_id) {
+            if f.params != params {
+                f.params = params;
+                self.schedule_freeform_refit(freeform_id);
+            }
+        }
+    }
+
+    pub(crate) fn select_freeform(&mut self, id: u64) {
+        self.selected_freeform_id = Some(id);
+    }
+
+    pub(crate) fn delete_freeform(&mut self, id: u64) {
+        self.push_snapshot();
+        self.freeforms.retain(|f| f.id != id);
+        if self.selected_freeform_id == Some(id) {
+            self.selected_freeform_id = self.freeforms.last().map(|f| f.id);
+        }
+        if self.freeform_job.map(|(_, fid)| fid) == Some(id) {
+            self.freeform_job = None;
+        }
+        self.status = "Freeform surface deleted.".to_string();
+    }
+
+    pub(crate) fn export_freeform_id(&mut self, freeform_id: u64) {
+        if let Some(f) = self.freeforms.iter().find(|f| f.id == freeform_id) {
+            match crate::export::export_freeform_dialog(f) {
+                Ok(msg) => self.status = msg,
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
         }
     }
 
@@ -1170,6 +1471,198 @@ impl App {
         }
     }
 
+    /// Drops all face group data (e.g. because the mesh topology changed).
+    pub(crate) fn invalidate_face_groups(&mut self) {
+        self.face_groups.clear();
+        self.group_ids.clear();
+        self.selected_group = None;
+        self.hover_group = None;
+    }
+
+    pub(crate) fn detect_face_groups(&mut self) {
+        let Some(m) = self.display().cloned() else { return; };
+        let Some(topo) = self.ensure_topology() else { return; };
+        let min_tris = self.group_min_tris.round().max(1.0) as usize;
+        let (groups, ids) = crate::geom::segment::segment_faces(
+            &m,
+            &topo,
+            self.group_angle_deg,
+            min_tris,
+            self.group_fit_tol,
+        );
+        let planes = groups.iter().filter(|g| g.kind == GroupKind::Plane).count();
+        let cylinders = groups.iter().filter(|g| g.kind == GroupKind::Cylinder).count();
+        let spheres = groups.iter().filter(|g| g.kind == GroupKind::Sphere).count();
+        let other = groups.len() - planes - cylinders - spheres;
+        self.selected_group = None;
+        self.hover_group = None;
+        if groups.is_empty() {
+            self.status =
+                "No face groups found. Try a larger crease angle or smaller min faces."
+                    .to_string();
+        } else {
+            self.status = format!(
+                "{} face groups: {} planes, {} cylinders, {} spheres, {} other",
+                groups.len(),
+                planes,
+                cylinders,
+                spheres,
+                other
+            );
+        }
+        self.face_groups = groups;
+        self.group_ids = ids;
+        self.groups_show = true;
+        self.aux_dirty = true;
+    }
+
+    pub(crate) fn clear_face_groups(&mut self) {
+        self.invalidate_face_groups();
+        self.aux_dirty = true;
+        self.status = "Face groups cleared.".to_string();
+    }
+
+    /// Selects the faces of a group. With `additive` the group's faces are
+    /// merged into the current selection instead of replacing it.
+    pub(crate) fn select_group_faces(&mut self, id: i32, additive: bool) {
+        let Some(m) = self.display() else { return; };
+        if self.group_ids.len() != m.triangle_count() {
+            return;
+        }
+        if !self.face_groups.iter().any(|g| g.id == id) {
+            return;
+        }
+        let tris = m.triangle_count();
+        let prev = if additive && self.sel.len() == tris {
+            self.sel_count
+        } else {
+            0
+        };
+        self.push_snapshot();
+        let Some(g) = self.face_groups.iter().find(|g| g.id == id) else { return; };
+        let kind = g.kind;
+        let mut sel = if additive && self.sel.len() == tris {
+            (*self.sel).clone()
+        } else {
+            vec![0u8; tris]
+        };
+        for &t in &g.tris {
+            sel[t as usize] = 1;
+        }
+        self.sel = Arc::new(sel);
+        self.recount_sel();
+        self.aux_dirty = true;
+        self.status = if additive && prev > 0 {
+            format!(
+                "Group #{} ({}): +{} faces added, {} total selected.",
+                id + 1,
+                kind.label(),
+                self.sel_count - prev,
+                self.sel_count
+            )
+        } else {
+            format!(
+                "Group #{} ({}): {} faces selected.",
+                id + 1,
+                kind.label(),
+                self.sel_count
+            )
+        };
+    }
+
+    /// Selects the group's faces and pushes a fitted plane into the objects list.
+    pub(crate) fn fit_group_plane(&mut self, id: i32) {
+        self.select_group_faces(id, false);
+        self.fit_plane_from_selection();
+    }
+
+    /// Selects the group's faces and fits a freeform surface onto them.
+    pub(crate) fn fit_group_freeform(&mut self, id: i32) {
+        self.select_group_faces(id, false);
+        self.fit_freeform_from_selection();
+    }
+
+    pub(crate) fn align_group_axis(&mut self, id: i32, axis: Vec3) {
+        let Some(g) = self.face_groups.iter().find(|g| g.id == id) else { return; };
+        let q = rotation_between(g.normal, axis);
+        let kind = g.kind;
+        self.apply_transform(q, Vec3::ZERO);
+        self.status = format!(
+            "Group #{} ({}) aligned to {}.",
+            id + 1,
+            kind.label(),
+            axis_name(axis)
+        );
+    }
+
+    pub(crate) fn origin_on_group_plane(&mut self, id: i32) {
+        let Some(g) = self.face_groups.iter().find(|g| g.id == id) else { return; };
+        let d = g.point.dot(g.normal);
+        self.apply_transform(Quat::IDENTITY, -g.normal * d);
+        self.status = "Origin moved onto the group plane.".to_string();
+    }
+
+    pub(crate) fn origin_on_group_axis(&mut self, id: i32) {
+        let Some(g) = self.face_groups.iter().find(|g| g.id == id) else { return; };
+        let p = g.point - g.normal * g.point.dot(g.normal);
+        self.apply_transform(Quat::IDENTITY, -p);
+        self.status = "Origin moved onto the cylinder axis.".to_string();
+    }
+
+    /// Double-click pick: selects the complete face group under the cursor.
+    /// If no face group exists there (or none were detected), falls back to a
+    /// Meshmixer-style region select grown from the clicked triangle using the
+    /// brush crease angle.
+    pub(crate) fn select_region_under(&mut self, tri: u32) {
+        let Some(m) = self.display() else { return; };
+        let tris = m.triangle_count();
+        if (tri as usize) < tris && self.group_ids.len() == tris {
+            let gid = self.group_ids[tri as usize];
+            if gid >= 0 && self.face_groups.iter().any(|g| g.id == gid) {
+                self.select_group_faces(gid, self.group_sel_additive);
+                return;
+            }
+        }
+        if let Some(topo) = self.ensure_topology() {
+            let region =
+                crate::geom::topology::flood_select_from(&topo, tri, self.expand_angle_deg.to_radians());
+            if region.is_empty() {
+                return;
+            }
+            self.push_snapshot();
+            let additive = self.group_sel_additive && self.sel.len() == tris;
+            let mut sel = if additive {
+                (*self.sel).clone()
+            } else {
+                vec![0u8; tris]
+            };
+            let mut added = 0usize;
+            for &t in &region {
+                if sel[t as usize] == 0 {
+                    sel[t as usize] = 1;
+                    added += 1;
+                }
+            }
+            self.sel = Arc::new(sel);
+            self.recount_sel();
+            self.aux_dirty = true;
+            self.status = if additive {
+                format!(
+                    "Region added (crease angle {:.1}°): +{} faces, {} total selected",
+                    self.expand_angle_deg,
+                    added,
+                    self.sel_count
+                )
+            } else {
+                format!(
+                    "Region selected (crease angle {:.1}°): {} faces",
+                    self.expand_angle_deg,
+                    added
+                )
+            };
+        }
+    }
+
     pub(crate) fn apply_preview(&mut self) {
         if let Some(p) = self.preview.clone() {
             self.push_snapshot();
@@ -1182,6 +1675,7 @@ impl App {
             self.sel_count = 0;
             self.bvh = None;
             self.topology = None;
+            self.invalidate_face_groups();
             self.hover_hit = None;
             self.hover_tris.clear();
             self.mesh_dirty = true;
@@ -1199,6 +1693,7 @@ impl App {
         self.sel_count = 0;
         self.bvh = None;
         self.topology = None;
+        self.invalidate_face_groups();
         self.hover_hit = None;
         self.hover_tris.clear();
         self.mesh_dirty = true;
@@ -1218,6 +1713,7 @@ impl App {
             self.sel_count = 0;
             self.bvh = None;
             self.topology = None;
+            self.invalidate_face_groups();
             self.hover_hit = None;
             self.hover_tris.clear();
             self.deviation = None;
@@ -1240,6 +1736,7 @@ impl App {
         self.sel_count = 0;
         self.bvh = None;
         self.topology = None;
+        self.invalidate_face_groups();
         self.hover_hit = None;
         self.hover_tris.clear();
         self.deviation = None;
@@ -1736,7 +2233,7 @@ impl App {
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let hint: String = match self.mode {
-                Mode::Orbit => "LMB drag = select · Shift+LMB = erase · Alt+Wheel = brush size · Ctrl+Wheel = expand/shrink · RMB drag = orbit · MMB drag = pan · Wheel = zoom".to_string(),
+                Mode::Orbit => "LMB drag = select · Shift+LMB = erase · Double-click = select group · Alt+Wheel = brush size · Ctrl+Wheel = expand/shrink · RMB drag = orbit · MMB drag = pan · Wheel = zoom".to_string(),
                 Mode::SymPickLine => {
                     if self.sym_pick.len() >= 2 {
                         "Symmetry line ready · Esc = reset".to_string()
@@ -1974,6 +2471,27 @@ impl App {
             }
         }
 
+        // Double-click: select the complete face group under the cursor
+        // (Meshmixer style). Falls back to a crease-angle grown region when
+        // no face group exists there.
+        if self.mode != Mode::SymPickLine
+            && !is_navigating
+            && !self.suppress_sel_drag
+            && response.double_clicked()
+        {
+            if let Some(pos) = response.hover_pos() {
+                let sx = pos.x - rect.min.x;
+                let sy = pos.y - rect.min.y;
+                if let Some(bvh) = self.ensure_bvh() {
+                    if let Some(hit) =
+                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
+                    {
+                        self.select_region_under(hit.tri);
+                    }
+                }
+            }
+        }
+
         // Real-time hover preview computation (only when not navigating and not painting)
         let mut new_hover_hit = None;
         let mut new_hover_tris = Vec::new();
@@ -2176,6 +2694,42 @@ impl App {
                     }
                 }
             }
+            for f in &self.freeforms {
+                if !f.visible {
+                    continue;
+                }
+                let Some(surf) = &f.surface else {
+                    continue;
+                };
+                let is_sel = self.selected_freeform_id == Some(f.id);
+                let col = f.color;
+                let fill_col = if is_sel {
+                    [col[0], col[1], col[2], 0.30]
+                } else {
+                    [col[0], col[1], col[2], 0.16]
+                };
+                let edge_col = if is_sel {
+                    [1.0, 1.0, 0.3, 1.0]
+                } else {
+                    [col[0], col[1], col[2], 0.9]
+                };
+                for chunk in surf.indices.chunks_exact(3) {
+                    for k in 0..3 {
+                        let p = surf.positions[chunk[k] as usize];
+                        fills.push([
+                            p[0], p[1], p[2], fill_col[0], fill_col[1], fill_col[2], fill_col[3],
+                        ]);
+                    }
+                }
+                for (a, b) in &f.boundary {
+                    push_line(
+                        &mut depth_lines,
+                        Vec3::from(*a),
+                        Vec3::from(*b),
+                        edge_col,
+                    );
+                }
+            }
             if self.mode == Mode::SymPickLine {
                 if let Some(h) = hover_pos_3d {
                     overlay_lines.extend(marker_lines(h, diag * 0.02, [0.2, 0.9, 1.0, 1.0]));
@@ -2318,11 +2872,53 @@ impl App {
                 if self.aux_dirty {
                     if let Some(m) = self.display() {
                         let nv = m.vertex_count();
-                        let mut aux = vec![[0.0f32; 2]; nv];
+                        // aux per vertex: x = selection/hover, y = deviation heat,
+                        // z = face group color code (id, type code or -1/-2), w = group id.
+                        let mut aux = vec![[0.0f32, 0.0, -1.0, -1.0]; nv];
                         if let Some(heat) = &self.heat {
                             if heat.len() == nv && self.heat_on {
                                 for (a, h) in aux.iter_mut().zip(heat.iter()) {
                                     a[1] = *h;
+                                }
+                            }
+                        }
+                        if self.groups_show
+                            && !self.face_groups.is_empty()
+                            && self.group_ids.len() == m.triangle_count()
+                        {
+                            let by_type = self.groups_by_type;
+                            let filter = self.groups_filter;
+                            // -1 = no group yet, -2 = boundary between two groups.
+                            let mut vgid = vec![-1i32; nv];
+                            for t in 0..m.triangle_count() {
+                                let g = self.group_ids[t];
+                                if g < 0 {
+                                    continue;
+                                }
+                                for k in 0..3 {
+                                    let v = m.indices[3 * t + k] as usize;
+                                    match vgid[v] {
+                                        -1 => vgid[v] = g,
+                                        cur if cur == g => {}
+                                        _ => vgid[v] = -2,
+                                    }
+                                }
+                            }
+                            for (v, a) in aux.iter_mut().enumerate() {
+                                let vg = vgid[v];
+                                if vg >= 0 {
+                                    let kind = self.face_groups[vg as usize].kind;
+                                    if group_matches_filter(kind, filter) {
+                                        a[2] = if by_type {
+                                            -(3.0 + kind as i32 as f32)
+                                        } else {
+                                            vg as f32
+                                        };
+                                        a[3] = vg as f32;
+                                    }
+                                } else if vg == -2 {
+                                    a[2] = -2.0;
+                                    a[3] = -1.0;
                                 }
                             }
                         }
@@ -2362,6 +2958,13 @@ impl App {
                     }
                 }
                 let (light1, light2) = self.camera.light_directions();
+                let groups_on = self.groups_show
+                    && !self.face_groups.is_empty()
+                    && self
+                        .display()
+                        .map(|m| self.group_ids.len() == m.triangle_count())
+                        .unwrap_or(false);
+                let hover_gid = self.hover_group.map(|g| g as f32).unwrap_or(-1.0);
                 gpu.set_frame(
                     self.camera.view_proj(),
                     self.camera.eye(),
@@ -2373,6 +2976,8 @@ impl App {
                     } else {
                         0.0
                     },
+                    groups_on,
+                    hover_gid,
                     self.show_mesh,
                     self.show_wireframe,
                 );

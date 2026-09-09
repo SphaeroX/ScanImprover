@@ -1,4 +1,6 @@
-use crate::app::{App, DecMode, Mode, rotation_between};
+use crate::app::{App, DecMode, GroupFilter, Mode, group_matches_filter, rotation_between};
+use crate::geom::freeform::FreeformExtend;
+use crate::geom::segment::{KIND_COLORS, GroupKind, group_hue_color};
 use crate::ui::accordion::group_box;
 use eframe::egui;
 use glam::Vec3;
@@ -330,6 +332,9 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             if ui.button("Fit circle").clicked() {
                 app.fit_circle_from_selection();
             }
+            if ui.button("Fit freeform").clicked() {
+                app.fit_freeform_from_selection();
+            }
         });
     });
 
@@ -435,9 +440,13 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
                 "Circle R = {:.4} mm, center ({:.2}, {:.2}, {:.2})",
                 c.radius, c.center.x, c.center.y, c.center.z
             ));
+            if c.cylinder {
+                ui.label("Fitted as cylinder cross-section (plane perpendicular to the axis).");
+            }
             ui.label(format!(
-                "Radial RMS {:.4} mm · plane RMS {:.4} mm · max {:.4} mm",
+                "Radial RMS {:.4} mm · {} {:.4} mm · max {:.4} mm",
                 c.radial_rms.sqrt(),
+                if c.cylinder { "axial span RMS" } else { "plane RMS" },
                 c.plane_rms.sqrt(),
                 c.radial_max
             ));
@@ -484,6 +493,430 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     }
+
+    if let Some(idx) = app
+        .freeforms
+        .iter()
+        .position(|f| app.selected_freeform_id == Some(f.id))
+    {
+        let title = format!("FITTED FREEFORM ({})", app.freeforms[idx].name);
+        let id = app.freeforms[idx].id;
+        let fitting = app.freeform_job.map(|(_, fid)| fid) == Some(id)
+            || app.freeforms[idx].refit_pending;
+        let mut new_params = None;
+        let mut do_export = false;
+        ui.add_space(4.0);
+        group_box(ui, Some(&title), |ui| {
+            let f = &mut app.freeforms[idx];
+            ui.checkbox(&mut f.visible, "Show surface");
+            ui.add_space(2.0);
+            if fitting {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label("Fitting surface…");
+                });
+            }
+            if f.surface.is_some() {
+                ui.label(format!(
+                    "Fit RMS {:.4} mm · max {:.4} mm · {} tris",
+                    f.rms,
+                    f.max_dev,
+                    f.surface.as_ref().unwrap().triangle_count()
+                ));
+                if f.fold_ratio > 0.15 {
+                    ui.label(
+                        egui::RichText::new(
+                            "Selection wraps around: the fit is inaccurate where it folds.",
+                        )
+                        .small()
+                        .color(egui::Color32::from_rgb(235, 170, 80)),
+                    );
+                }
+            } else if !fitting {
+                ui.label(
+                    egui::RichText::new("No surface yet (fit failed).")
+                        .weak()
+                        .small(),
+                );
+            }
+            ui.add_space(3.0);
+            let mut p = f.params;
+            let diag = app.bbox.diagonal().max(1e-6);
+            let max_ov = (diag * 0.25).max(1.0);
+            let ov_resp = ui
+                .add(
+                    egui::Slider::new(&mut p.overshoot_mm, 0.0..=max_ov).text("Overshoot (mm)"),
+                )
+                .on_hover_text("How far the freeform surface extends beyond the selection boundary.");
+            let res_resp = ui
+                .add(egui::Slider::new(&mut p.resolution, 16..=320).text("Resolution"))
+                .on_hover_text(
+                    "Grid density of the fitted surface (cells along the longer side).",
+                );
+            let sm_resp = ui
+                .add(egui::Slider::new(&mut p.smoothness, 0..=10).text("Smoothness"))
+                .on_hover_text(
+                    "Smoothing passes over the fitted grid (QuickSurface-style). \
+                     0 follows the scan closely; higher values give a cleaner, \
+                     CAD-friendlier surface.",
+                );
+            if ov_resp.changed() || res_resp.changed() || sm_resp.changed() {
+                new_params = Some(p);
+            }
+            ui.horizontal(|ui| {
+                ui.label("Extend:");
+                if ui
+                    .selectable_value(
+                        &mut p.extend,
+                        FreeformExtend::Slope,
+                        FreeformExtend::Slope.label(),
+                    )
+                    .clicked()
+                {
+                    new_params = Some(p);
+                }
+                if ui
+                    .selectable_value(
+                        &mut p.extend,
+                        FreeformExtend::Curvature,
+                        FreeformExtend::Curvature.label(),
+                    )
+                    .clicked()
+                {
+                    new_params = Some(p);
+                }
+            })
+            .response
+            .on_hover_text(
+                "How the surface continues into the overshoot region: tangent only, \
+                 or following the local curvature (better for organic shapes).",
+            );
+            ui.add_space(3.0);
+            if ui
+                .button("Export freeform…")
+                .on_hover_text(
+                    "Export as a CAD surface (STEP B-spline, trim it in Fusion) or as a mesh (STL, OBJ, PLY)",
+                )
+                .clicked()
+            {
+                do_export = true;
+            }
+        });
+        if let Some(p) = new_params {
+            app.set_freeform_params(id, p);
+        }
+        if do_export {
+            app.export_freeform_id(id);
+        }
+    }
+}
+
+/// Renders the Face Groups section inside the accordion body.
+pub fn render_face_groups(app: &mut App, ui: &mut egui::Ui) {
+    // Reset each frame; hovered rows re-set this to highlight in the viewport.
+    app.hover_group = None;
+
+    let tris = app.display().map(|m| m.triangle_count()).unwrap_or(0);
+    // Live re-segmentation while dragging sliders only for manageable meshes.
+    let live = tris <= SEG_LIVE_MAX_TRIS;
+    let has_groups = !app.face_groups.is_empty();
+    let mut run_detect = false;
+
+    group_box(ui, Some("DETECTION"), |ui| {
+        let angle_resp = ui.add(
+            egui::Slider::new(&mut app.group_angle_deg, 2.0..=90.0)
+                .text("Crease angle")
+                .suffix("°"),
+        );
+        let min_resp = ui.add(
+            egui::Slider::new(&mut app.group_min_tris, 1.0..=5000.0)
+                .text("Min faces")
+                .logarithmic(true),
+        );
+        let mut tol_pct = app.group_fit_tol * 100.0;
+        let tol_resp = ui.add(
+            egui::Slider::new(&mut tol_pct, 0.02..=2.0)
+                .text("Fit tolerance")
+                .suffix("% of size"),
+        );
+        if tol_resp.changed() {
+            app.group_fit_tol = tol_pct / 100.0;
+        }
+        ui.add_space(2.0);
+        // Re-run live while dragging (small meshes) or on slider release (big meshes).
+        let rerun = |resp: &egui::Response| has_groups && resp.changed() && (live || resp.drag_stopped());
+        if rerun(&angle_resp) || rerun(&min_resp) || rerun(&tol_resp) {
+            run_detect = true;
+        }
+        ui.horizontal(|ui| {
+            let label = if has_groups {
+                "Re-detect"
+            } else {
+                "Detect groups"
+            };
+            if ui.button(label).clicked() {
+                run_detect = true;
+            }
+            if has_groups && ui.button("Clear").clicked() {
+                app.clear_face_groups();
+            }
+        });
+        if has_groups && !live {
+            ui.label(
+                egui::RichText::new("Large mesh: colors update when the slider is released")
+                    .weak()
+                    .small(),
+            );
+        }
+    });
+
+    if run_detect {
+        app.detect_face_groups();
+    }
+
+    if app.face_groups.is_empty() {
+        return;
+    }
+
+    let planes = app
+        .face_groups
+        .iter()
+        .filter(|g| g.kind == GroupKind::Plane)
+        .count();
+    let cylinders = app
+        .face_groups
+        .iter()
+        .filter(|g| g.kind == GroupKind::Cylinder)
+        .count();
+    let spheres = app
+        .face_groups
+        .iter()
+        .filter(|g| g.kind == GroupKind::Sphere)
+        .count();
+    let other = app.face_groups.len() - planes - cylinders - spheres;
+
+    ui.add_space(4.0);
+    group_box(ui, Some("COLORING"), |ui| {
+        if ui
+            .checkbox(&mut app.groups_show, "Show group colors")
+            .changed()
+        {
+            app.aux_dirty = true;
+        }
+        let before = app.groups_by_type;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut app.groups_by_type, false, "Distinct");
+            ui.selectable_value(&mut app.groups_by_type, true, "By type");
+        });
+        if app.groups_by_type != before {
+            app.aux_dirty = true;
+        }
+        if app.groups_by_type {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let legend = [
+                    (GroupKind::Plane, "Plane"),
+                    (GroupKind::Cylinder, "Cylinder"),
+                    (GroupKind::Sphere, "Sphere"),
+                    (GroupKind::Freeform, "Freeform"),
+                ];
+                for (kind, label) in legend {
+                    ui.label(egui::RichText::new("■").color(kind_color32(kind)).size(12.0));
+                    ui.label(egui::RichText::new(label).small());
+                    ui.add_space(6.0);
+                }
+            });
+        }
+        ui.add_space(2.0);
+        ui.label(format!(
+            "{} planes · {} cylinders · {} spheres · {} other",
+            planes, cylinders, spheres, other
+        ));
+    });
+
+    ui.add_space(4.0);
+    ui.checkbox(&mut app.group_sel_additive, "Keep existing selection")
+        .on_hover_text(
+            "When checked, double-clicking a group (or pressing Sel) adds its faces \
+             to the current selection. When unchecked, the selection is replaced.",
+        );
+
+    ui.add_space(4.0);
+    group_box(ui, Some(&format!("GROUPS ({})", app.face_groups.len())), |ui| {
+        let before = app.groups_filter;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut app.groups_filter, GroupFilter::All, "All");
+            ui.selectable_value(&mut app.groups_filter, GroupFilter::Plane, "Planes");
+            ui.selectable_value(&mut app.groups_filter, GroupFilter::Cylinder, "Cyls");
+            ui.selectable_value(&mut app.groups_filter, GroupFilter::Sphere, "Spheres");
+            ui.selectable_value(&mut app.groups_filter, GroupFilter::Freeform, "Freeform");
+        });
+        if app.groups_filter != before {
+            app.aux_dirty = true;
+        }
+        ui.label(
+            egui::RichText::new(
+                "Filter also grays out non-matching groups in the viewport · hover a row to highlight",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(3.0);
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for i in 0..app.face_groups.len() {
+                    let (id, kind, n) = {
+                        let g = &app.face_groups[i];
+                        (g.id, g.kind, g.tris.len())
+                    };
+                    if !group_matches_filter(kind, app.groups_filter) {
+                        continue;
+                    }
+                    let dot = if app.groups_by_type {
+                        kind_color32(kind)
+                    } else {
+                        hue_color32(id)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("■").color(dot).size(13.0));
+                        let title = format!("{} · {:>6} faces", kind.label(), n);
+                        let sel = app.selected_group == Some(id);
+                        let text = egui::RichText::new(title);
+                        let text = if sel { text.strong() } else { text };
+                        let resp = ui.selectable_label(sel, text);
+                        if resp.hovered() {
+                            app.hover_group = Some(id);
+                        }
+                        if resp.clicked() {
+                            app.selected_group = Some(id);
+                        }
+                        if ui.small_button("Sel").clicked() {
+                            app.select_group_faces(id, app.group_sel_additive);
+                        }
+                    });
+                }
+            });
+    });
+
+    if let Some(id) = app.selected_group {
+        let found = app
+            .face_groups
+            .iter()
+            .find(|g| g.id == id)
+            .map(|g| (g.kind, g.tris.len(), g.area, g.rms, g.normal, g.point, g.radius));
+        if let Some((kind, n, area, rms, normal, point, radius)) = found {
+            ui.add_space(4.0);
+            group_box(ui, Some(&format!("GROUP {} · {}", id + 1, kind.label())), |ui| {
+                ui.label(format!(
+                    "{} faces · {:.1} mm² · fit RMS {:.4} mm",
+                    n, area, rms
+                ));
+                ui.add_space(3.0);
+                match kind {
+                    GroupKind::Plane => {
+                        ui.label(format!(
+                            "Normal ({:.3}, {:.3}, {:.3}) · offset {:.3} mm",
+                            normal.x,
+                            normal.y,
+                            normal.z,
+                            point.dot(normal)
+                        ));
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Select faces").clicked() {
+                                app.select_group_faces(id, app.group_sel_additive);
+                            }
+                            if ui.button("Fit plane → objects").clicked() {
+                                app.fit_group_plane(id);
+                            }
+                        });
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("N → X").clicked() {
+                                app.align_group_axis(id, Vec3::X);
+                            }
+                            if ui.button("N → Y").clicked() {
+                                app.align_group_axis(id, Vec3::Y);
+                            }
+                            if ui.button("N → Z").clicked() {
+                                app.align_group_axis(id, Vec3::Z);
+                            }
+                            if ui.button("Origin on plane").clicked() {
+                                app.origin_on_group_plane(id);
+                            }
+                        });
+                    }
+                    GroupKind::Cylinder => {
+                        ui.label(format!(
+                            "Axis ({:.3}, {:.3}, {:.3}) · R = {:.4} mm",
+                            normal.x, normal.y, normal.z, radius
+                        ));
+                        ui.add_space(3.0);
+                        if ui.button("Select faces").clicked() {
+                            app.select_group_faces(id, app.group_sel_additive);
+                        }
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Axis → X").clicked() {
+                                app.align_group_axis(id, Vec3::X);
+                            }
+                            if ui.button("Axis → Y").clicked() {
+                                app.align_group_axis(id, Vec3::Y);
+                            }
+                            if ui.button("Axis → Z").clicked() {
+                                app.align_group_axis(id, Vec3::Z);
+                            }
+                            if ui.button("Origin → axis").clicked() {
+                                app.origin_on_group_axis(id);
+                            }
+                        });
+                    }
+                    GroupKind::Sphere => {
+                        ui.label(format!(
+                            "Center ({:.3}, {:.3}, {:.3}) · R = {:.4} mm",
+                            point.x, point.y, point.z, radius
+                        ));
+                        ui.add_space(3.0);
+                        if ui.button("Select faces").clicked() {
+                            app.select_group_faces(id, app.group_sel_additive);
+                        }
+                    }
+                    GroupKind::Freeform => {
+                        ui.horizontal(|ui| {
+                            if ui.button("Select faces").clicked() {
+                                app.select_group_faces(id, app.group_sel_additive);
+                            }
+                            if ui.button("Fit freeform → objects").clicked() {
+                                app.fit_group_freeform(id);
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Maximum triangle count for live re-segmentation while dragging sliders.
+const SEG_LIVE_MAX_TRIS: usize = 600_000;
+
+fn kind_color32(kind: GroupKind) -> egui::Color32 {
+    let c = KIND_COLORS[kind as usize];
+    egui::Color32::from_rgb(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+    )
+}
+
+fn hue_color32(id: i32) -> egui::Color32 {
+    let c = group_hue_color(id);
+    egui::Color32::from_rgb(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+    )
 }
 
 /// Renders the Coordinate System section inside the accordion body.

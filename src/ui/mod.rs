@@ -14,6 +14,7 @@ use eframe::egui;
 pub enum ToolSection {
     Symmetry,
     Selection,
+    FaceGroups,
     Coordinates,
     Repair,
     Decimation,
@@ -70,7 +71,31 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 3: Coordinate system
+        // Section 3: Face groups
+        let fg_badge_str = if !app.face_groups.is_empty() {
+            Some(format!("{} groups", app.face_groups.len()))
+        } else {
+            None
+        };
+        let fg_open = app.active_section == Some(ToolSection::FaceGroups);
+        if !fg_open {
+            app.hover_group = None;
+        }
+        if accordion_header(ui, "Face groups", fg_open, fg_badge_str.as_deref()) {
+            app.active_section = if fg_open {
+                None
+            } else {
+                Some(ToolSection::FaceGroups)
+            };
+        }
+        if fg_open {
+            accordion_body(ui, |ui| {
+                sections::render_face_groups(app, ui);
+            });
+        }
+        ui.add_space(3.0);
+
+        // Section 4: Coordinate system
         let coord_badge_str = if !app.undo.is_empty() {
             Some(format!("{} undos", app.undo.len()))
         } else {
@@ -96,7 +121,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 4: Mesh repair
+        // Section 5: Mesh repair
         let repair_badge_str = if !app.repair_holes.is_empty() {
             Some(format!("{} holes", app.repair_holes.len()))
         } else if let Some(h) = &app.repair_health {
@@ -128,7 +153,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(3.0);
 
-        // Section 5: Decimation
+        // Section 6: Decimation
         let dec_badge = if app.preview.is_some() {
             Some("Preview active")
         } else {

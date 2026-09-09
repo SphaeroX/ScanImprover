@@ -16,13 +16,13 @@ struct Uniforms {
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) nrm: vec3<f32>,
-    @location(2) aux: vec2<f32>,
+    @location(2) aux: vec4<f32>,
 };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) wp: vec3<f32>,
     @location(1) nrm: vec3<f32>,
-    @location(2) aux: vec2<f32>,
+    @location(2) aux: vec4<f32>,
 };
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
@@ -47,6 +47,47 @@ fn heat_color(t: f32) -> vec3<f32> {
     return mix(vec3<f32>(1.00, 0.80, 0.00), vec3<f32>(0.95, 0.10, 0.10), (t - 0.75) / 0.25);
 }
 
+// Distinct hue per face group id.
+// Must stay in sync with `group_hue_color` in src/geom/segment.rs.
+fn group_color(id: f32) -> vec3<f32> {
+    let h = fract(id * 0.61803398875 + 0.04);
+    let s = 0.62;
+    let v = 1.0;
+    let c = v * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - abs(fract(hp * 0.5) * 2.0 - 1.0));
+    let m = v - c;
+    let i = i32(hp) % 6;
+    var rgb = vec3<f32>(c + m, x + m, m);
+    if (i == 1) {
+        rgb = vec3<f32>(x + m, c + m, m);
+    } else if (i == 2) {
+        rgb = vec3<f32>(m, c + m, x + m);
+    } else if (i == 3) {
+        rgb = vec3<f32>(m, x + m, c + m);
+    } else if (i == 4) {
+        rgb = vec3<f32>(x + m, m, c + m);
+    } else if (i == 5) {
+        rgb = vec3<f32>(c + m, m, x + m);
+    }
+    return rgb;
+}
+
+// Semantic type colors: code 3 = plane, 4 = cylinder, 5 = sphere, 6 = freeform.
+// Must stay in sync with `KIND_COLORS` in src/geom/segment.rs.
+fn type_color(code: f32) -> vec3<f32> {
+    if (code < 3.5) {
+        return vec3<f32>(0.30, 0.55, 0.98);
+    }
+    if (code < 4.5) {
+        return vec3<f32>(0.30, 0.82, 0.42);
+    }
+    if (code < 5.5) {
+        return vec3<f32>(0.98, 0.66, 0.28);
+    }
+    return vec3<f32>(0.78, 0.45, 0.62);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = normalize(U.cam_pos.xyz - in.wp);
@@ -58,8 +99,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let h1 = normalize(l1 + v);
     let spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
     var col = vec3<f32>(0.72, 0.74, 0.78);
+    // Face group coloring: aux.z >= 0 = distinct hue id,
+    // <= -3.0 = type code, -2.0 = group boundary seam, -1.0 = ungrouped.
+    if (U.params.z > 0.5 && in.aux.z >= 0.0) {
+        col = group_color(in.aux.z);
+    } else if (U.params.z > 0.5 && in.aux.z <= -3.0) {
+        col = type_color(-in.aux.z);
+    } else if (U.params.z > 0.5 && in.aux.z <= -2.5) {
+        col = vec3<f32>(0.16, 0.17, 0.21);
+    }
     if (U.params.x > 0.5 && in.aux.y >= 0.0) {
         col = heat_color(clamp(in.aux.y * U.params.y, 0.0, 1.0));
+    }
+    if (U.params.z > 0.5 && U.params.w >= 0.0 && abs(in.aux.w - U.params.w) < 0.5) {
+        col = mix(col, vec3<f32>(1.0, 1.0, 1.0), 0.45);
     }
     if (in.aux.x > 0.75) {
         col = mix(col, vec3<f32>(1.0, 0.45, 0.10), 0.55);
@@ -302,12 +355,12 @@ impl GpuState {
             ],
         };
         let aux_layout = wgpu::VertexBufferLayout {
-            array_stride: 8,
+            array_stride: 16,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[wgpu::VertexAttribute {
                 offset: 0,
                 shader_location: 2,
-                format: wgpu::VertexFormat::Float32x2,
+                format: wgpu::VertexFormat::Float32x4,
             }],
         };
         let line_layout = wgpu::VertexBufferLayout {
@@ -535,9 +588,9 @@ impl GpuState {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let aux_data = vec![[0.0f32; 2]; nv];
+        let aux_data = vec![[0.0f32, 0.0, -1.0, -1.0]; nv];
         self.aux
-            .ensure(&self.device, (nv * 8) as u64, "scanimprover-aux");
+            .ensure(&self.device, (nv * 16) as u64, "scanimprover-aux");
         self.queue.write_buffer(
             self.aux.buf.as_ref().unwrap(),
             0,
@@ -554,7 +607,7 @@ impl GpuState {
         self.wire_verts = 0;
     }
 
-    pub fn upload_aux(&mut self, aux: &[[f32; 2]]) {
+    pub fn upload_aux(&mut self, aux: &[[f32; 4]]) {
         let nv = self
             .mesh
             .as_ref()
@@ -619,13 +672,20 @@ impl GpuState {
         light2: Vec3,
         heat_on: bool,
         heat_scale: f32,
+        groups_on: bool,
+        hover_group: f32,
         show_mesh: bool,
         show_wireframe: bool,
     ) {
         let u = Uniforms {
             viewproj: viewproj.to_cols_array_2d(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
-            params: [if heat_on { 1.0 } else { 0.0 }, heat_scale, 0.0, 0.0],
+            params: [
+                if heat_on { 1.0 } else { 0.0 },
+                heat_scale,
+                if groups_on { 1.0 } else { 0.0 },
+                hover_group,
+            ],
             light1: [light1.x, light1.y, light1.z, 0.0],
             light2: [light2.x, light2.y, light2.z, 0.0],
         };

@@ -172,6 +172,38 @@ pub fn shrink_selection(topo: &MeshTopology, current_sel: &[u8]) -> Vec<u8> {
     next_sel
 }
 
+/// Flood-fills the connected region around `seed`, crossing only edges whose
+/// dihedral angle is at most `angle_threshold_rad`. Returns the visited triangles.
+pub fn flood_select_from(topo: &MeshTopology, seed: u32, angle_threshold_rad: f32) -> Vec<u32> {
+    let nt = topo.triangle_count();
+    if seed as usize >= nt {
+        return Vec::new();
+    }
+    let cos_thresh = angle_threshold_rad.cos();
+    let mut visited = vec![false; nt];
+    visited[seed as usize] = true;
+    let mut stack = vec![seed];
+    let mut out = Vec::new();
+    while let Some(t) = stack.pop() {
+        out.push(t);
+        let na = topo.face_normals[t as usize];
+        for &nb in &topo.neighbors[t as usize] {
+            if nb == u32::MAX {
+                continue;
+            }
+            let nbi = nb as usize;
+            if visited[nbi] {
+                continue;
+            }
+            if na.dot(topo.face_normals[nbi]) >= cos_thresh {
+                visited[nbi] = true;
+                stack.push(nb);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +262,30 @@ mod tests {
         // Threshold 100 deg > 90 deg -> SHOULD grow
         let grown_allowed = grow_selection(&topo, &sel, 100.0f32.to_radians());
         assert_eq!(grown_allowed, vec![1u8, 1u8]);
+    }
+
+    #[test]
+    fn test_flood_select_from_angle_threshold() {
+        // Two triangles at 90 degrees (as in test_topology_angle_threshold)
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let indices = vec![0, 1, 2, 0, 3, 1];
+        let mesh = Mesh::from_indexed(positions, indices);
+        let topo = MeshTopology::build(&mesh);
+
+        let mut region = flood_select_from(&topo, 0, 45.0f32.to_radians());
+        region.sort_unstable();
+        assert_eq!(region, vec![0u32]);
+
+        let mut region = flood_select_from(&topo, 0, 100.0f32.to_radians());
+        region.sort_unstable();
+        assert_eq!(region, vec![0u32, 1u32]);
+
+        // Out-of-range seed must not panic.
+        assert!(flood_select_from(&topo, 7, 45.0f32.to_radians()).is_empty());
     }
 }

@@ -14,11 +14,16 @@ enum BrowserAction {
     DeleteCircle(u64),
     AlignCircle(u64, Vec3),
     OriginAtCircle(u64),
+    ToggleFreeformVisibility(u64),
+    SelectFreeform(u64),
+    DeleteFreeform(u64),
     FitPlane,
     FitCircle,
+    FitFreeform,
     ToggleSymmetryVisibility,
     ExportPlane(u64),
     ExportCircle(u64),
+    ExportFreeform(u64),
     ExportAllReferences,
     AlignToFeatures,
     ToggleAssign(
@@ -40,6 +45,7 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
     let total_count = (if app.display().is_some() { 1 } else { 0 })
         + app.planes.len()
         + app.circles.len()
+        + app.freeforms.len()
         + (if app.sym.is_some() { 1 } else { 0 });
 
     let window_title = format!("Objects ({total_count})");
@@ -90,6 +96,9 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                     }
                                     if ui.small_button("+ Fit Circle").clicked() {
                                         actions.push(BrowserAction::FitCircle);
+                                    }
+                                    if ui.small_button("+ Fit Freeform").clicked() {
+                                        actions.push(BrowserAction::FitFreeform);
                                     }
                                 });
                             });
@@ -586,7 +595,153 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                         }
                     }
 
-                    // --- SECTION 4: SYMMETRY PLANE (if active) ---
+                    // --- SECTION 4: FITTED FREEFORMS ---
+                    let freeform_count = app.freeforms.len();
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("FITTED FREEFORMS ({freeform_count})"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(130, 145, 170)),
+                        );
+                    });
+
+                    if app.freeforms.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No freeform surfaces fitted yet")
+                                .italics()
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(110)),
+                        );
+                    } else {
+                        for f in &app.freeforms {
+                            let is_sel = app.selected_freeform_id == Some(f.id);
+                            let fitting = app.freeform_job.map(|(_, fid)| fid) == Some(f.id)
+                                || f.refit_pending;
+
+                            let col32 = egui::Color32::from_rgba_unmultiplied(
+                                (f.color[0] * 255.0) as u8,
+                                (f.color[1] * 255.0) as u8,
+                                (f.color[2] * 255.0) as u8,
+                                255,
+                            );
+
+                            let bg_color = if is_sel {
+                                egui::Color32::from_rgba_unmultiplied(50, 70, 105, 80)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40)
+                            };
+
+                            let border_stroke = if is_sel {
+                                egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 120),
+                                )
+                            } else {
+                                egui::Stroke::NONE
+                            };
+
+                            egui::Frame::new()
+                                .fill(bg_color)
+                                .stroke(border_stroke)
+                                .corner_radius(4.0)
+                                .inner_margin(egui::Margin::symmetric(6, 5))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        // Visibility toggle
+                                        let mut vis = f.visible;
+                                        if ui.checkbox(&mut vis, "").changed() {
+                                            actions.push(BrowserAction::ToggleFreeformVisibility(f.id));
+                                        }
+
+                                        // Color indicator dot
+                                        let (dot_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(10.0, 10.0),
+                                            egui::Sense::empty(),
+                                        );
+                                        ui.painter().circle_filled(dot_rect.center(), 4.0, col32);
+
+                                        // Selectable name
+                                        let name_resp = ui.selectable_label(
+                                            is_sel,
+                                            egui::RichText::new(&f.name).size(12.0).strong(),
+                                        );
+                                        if name_resp.clicked() {
+                                            actions.push(BrowserAction::SelectFreeform(f.id));
+                                        }
+
+                                        // Delete button on the right
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .small_button(
+                                                        egui::RichText::new("✕")
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(
+                                                                220, 100, 100,
+                                                            )),
+                                                    )
+                                                    .on_hover_text("Delete freeform surface")
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::DeleteFreeform(f.id));
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    // If selected, show details
+                                    if is_sel {
+                                        ui.add_space(3.0);
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(20.0);
+                                            ui.vertical(|ui| {
+                                                if fitting {
+                                                    ui.horizontal(|ui| {
+                                                        ui.add(egui::Spinner::new());
+                                                        ui.label(
+                                                            egui::RichText::new("Fitting surface…")
+                                                                .size(10.5)
+                                                                .color(egui::Color32::from_rgb(
+                                                                    170, 180, 195,
+                                                                )),
+                                                        );
+                                                    });
+                                                } else if f.surface.is_some() {
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "RMS: {:.4} mm · overshoot: {:.2} mm · {} tris",
+                                                            f.rms,
+                                                            f.params.overshoot_mm,
+                                                            f.surface.as_ref().unwrap().triangle_count()
+                                                        ))
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(170, 180, 195)),
+                                                    );
+                                                }
+                                                ui.add_space(2.0);
+                                                if ui
+                                                    .small_button("Export Freeform…")
+                                                    .on_hover_text(
+                                                        "Export as STEP CAD surface (B-spline) or mesh (STL, OBJ, PLY)",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::ExportFreeform(f.id));
+                                                }
+                                            });
+                                        });
+                                    }
+                                });
+                            ui.add_space(2.0);
+                        }
+                    }
+
+                    // --- SECTION 5: SYMMETRY PLANE (if active) ---
                     let sym_show = app.sym.map(|s| s.show);
                     if let Some(mut show) = sym_show {
                         let feat = crate::geom::alignment::FeatureRef::SymmetryPlane;
@@ -754,6 +909,23 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
             }
             BrowserAction::FitCircle => {
                 app.fit_circle_from_selection();
+            }
+            BrowserAction::FitFreeform => {
+                app.fit_freeform_from_selection();
+            }
+            BrowserAction::ToggleFreeformVisibility(id) => {
+                if let Some(f) = app.freeforms.iter_mut().find(|f| f.id == id) {
+                    f.visible = !f.visible;
+                }
+            }
+            BrowserAction::SelectFreeform(id) => {
+                app.select_freeform(id);
+            }
+            BrowserAction::DeleteFreeform(id) => {
+                app.delete_freeform(id);
+            }
+            BrowserAction::ExportFreeform(id) => {
+                app.export_freeform_id(id);
             }
             BrowserAction::ToggleSymmetryVisibility => {
                 if let Some(sym) = &mut app.sym {

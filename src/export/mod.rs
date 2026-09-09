@@ -3,6 +3,7 @@ pub mod fusion_script;
 pub mod step;
 
 use crate::geom::fitting::{FittedCircle, FittedPlane};
+use crate::geom::freeform::FittedFreeform;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +84,55 @@ pub fn export_circle_dialog(circle: &FittedCircle) -> Result<String, String> {
         .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
 
     Ok(format!("Exported {} to {}", circle.name, path.display()))
+}
+
+/// Prompts the user to save a fitted freeform surface. STEP (.step/.stp)
+/// exports the surface as a real CAD B-spline face (4-sided patch over the
+/// overshoot rectangle; trim it in CAD). STL/OBJ/PLY export the fitted mesh.
+pub fn export_freeform_dialog(freeform: &FittedFreeform) -> Result<String, String> {
+    let Some(surface) = &freeform.surface else {
+        return Err("Freeform surface is still being fitted.".to_string());
+    };
+    let sanitized_name = sanitize_filename(&freeform.name);
+    let default_filename = format!("{sanitized_name}.step");
+
+    let file_path = rfd::FileDialog::new()
+        .add_filter("STEP CAD Surface (*.step, *.stp)", &["step", "stp"])
+        .add_filter("Mesh (*.stl)", &["stl"])
+        .add_filter("Mesh (*.obj)", &["obj"])
+        .add_filter("Mesh (*.ply)", &["ply"])
+        .set_file_name(&default_filename)
+        .save_file();
+
+    let Some(path) = file_path else {
+        return Ok("Export cancelled.".to_string());
+    };
+
+    let is_step = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "step" | "stp"))
+        .unwrap_or(false);
+
+    if is_step {
+        // Rebuild the fit over the full rectangle and convert it to a
+        // bicubic B-spline patch. Same source points and parameters as the
+        // displayed surface, so the shapes match up to the trimmed corners.
+        let grid = crate::geom::freeform::fit_freeform_grid(
+            &freeform.source_points,
+            &freeform.params,
+        )
+        .map_err(|e| format!("Could not rebuild the surface for STEP export: {e}"))?;
+        let net = crate::geom::freeform::bicubic_control_net(&grid);
+        let content = step::generate_freeform_step(&freeform.name, &net);
+        std::fs::write(&path, content)
+            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    } else {
+        crate::io::save_any(&path, surface)
+            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    }
+
+    Ok(format!("Exported {} to {}", freeform.name, path.display()))
 }
 
 /// Prompts the user to save all visible planes and circles into a single STEP, Python, or DXF file.

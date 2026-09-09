@@ -64,6 +64,29 @@ mod tests {
         Mesh::from_indexed(v, idx)
     }
 
+    fn cylinder_wall_mesh(radius: f32, height: f32, rings: usize, sectors: usize) -> Mesh {
+        let mut v = Vec::new();
+        for r in 0..=rings {
+            let z = height * r as f32 / rings as f32;
+            for s in 0..sectors {
+                let theta = 2.0 * std::f32::consts::PI * s as f32 / sectors as f32;
+                v.push([radius * theta.cos(), radius * theta.sin(), z]);
+            }
+        }
+        let mut idx = Vec::new();
+        for r in 0..rings {
+            for s in 0..sectors {
+                let s1 = (s + 1) % sectors;
+                let a = (r * sectors + s) as u32;
+                let b = (r * sectors + s1) as u32;
+                let c = ((r + 1) * sectors + s) as u32;
+                let d = ((r + 1) * sectors + s1) as u32;
+                idx.extend_from_slice(&[a, b, d, a, d, c]);
+            }
+        }
+        Mesh::from_indexed(v, idx)
+    }
+
     fn merge(a: &Mesh, b: &Mesh) -> Mesh {
         let mut v = a.positions.clone();
         let mut idx = a.indices.clone();
@@ -203,6 +226,103 @@ mod tests {
         assert!((c.center.y - 2.0).abs() < 1e-3);
         assert!((c.center.z - 0.5).abs() < 1e-3);
         assert!(c.radial_rms.sqrt() < 1e-3);
+        assert!(!c.cylinder, "planar ring must not be reported as cylinder");
+    }
+
+    #[test]
+    fn circle_fit_on_tall_cylinder_wall_patch() {
+        // 240 degree patch of a vertical cylinder, R = 8, axis Z through
+        // (2, -3), height 30: the PCA plane would be slanted along the wall.
+        let mut pts = Vec::new();
+        let n_ang = 120;
+        let n_h = 40;
+        for i in 0..n_ang {
+            let a = i as f32 / n_ang as f32 * 240.0f32.to_radians();
+            for j in 0..n_h {
+                let z = -5.0 + 30.0 * j as f32 / (n_h - 1) as f32;
+                pts.push([2.0 + 8.0 * a.cos(), -3.0 + 8.0 * a.sin(), z]);
+            }
+        }
+        let c = fit_circle(&pts).unwrap();
+        assert!(c.cylinder, "cylinder wall must be recognized");
+        assert!(
+            c.normal.z.abs() > 0.999,
+            "normal must be the cylinder axis, got {:?}",
+            c.normal
+        );
+        assert!((c.radius - 8.0).abs() < 0.01, "radius {}", c.radius);
+        assert!((c.center.x - 2.0).abs() < 0.01, "center {:?}", c.center);
+        assert!((c.center.y + 3.0).abs() < 0.01, "center {:?}", c.center);
+        assert!(c.radial_rms.sqrt() < 1e-3, "radial rms {}", c.radial_rms);
+    }
+
+    #[test]
+    fn circle_fit_on_narrow_tall_cylinder_strip() {
+        // 30 degree arc, R = 12, height 40: the PCA plane would run lengthwise
+        // along the wall (a "section along the height"), giving a crooked fit.
+        let mut pts = Vec::new();
+        let n_ang = 24;
+        let n_h = 60;
+        for i in 0..n_ang {
+            let a = i as f32 / n_ang as f32 * 30.0f32.to_radians();
+            for j in 0..n_h {
+                let z = 40.0 * j as f32 / (n_h - 1) as f32;
+                pts.push([12.0 * a.cos(), 12.0 * a.sin(), z]);
+            }
+        }
+        let c = fit_circle(&pts).unwrap();
+        assert!(c.cylinder, "cylinder strip must be recognized");
+        assert!(
+            c.normal.z.abs() > 0.99,
+            "normal must be the cylinder axis, got {:?}",
+            c.normal
+        );
+        assert!((c.radius - 12.0).abs() < 0.1, "radius {}", c.radius);
+        assert!(c.center.x.abs() < 0.1, "center {:?}", c.center);
+        assert!(c.center.y.abs() < 0.1, "center {:?}", c.center);
+        assert!(c.radial_rms.sqrt() < 0.05, "radial rms {}", c.radial_rms);
+    }
+
+    #[test]
+    fn circle_fit_full_cylinder_wall_mesh() {
+        // Triangle vertices of a complete cylinder wall, R = 10, height 40.
+        let m = cylinder_wall_mesh(10.0, 40.0, 6, 32);
+        let mut pts: Vec<[f32; 3]> = Vec::new();
+        for t in 0..m.triangle_count() {
+            for k in 0..3 {
+                pts.push(m.positions[m.indices[3 * t + k] as usize]);
+            }
+        }
+        let c = fit_circle(&pts).unwrap();
+        assert!(c.cylinder, "full cylinder wall must be recognized");
+        assert!(c.normal.z.abs() > 0.999, "normal {:?}", c.normal);
+        assert!((c.radius - 10.0).abs() < 0.01, "radius {}", c.radius);
+        assert!(c.center.x.abs() < 0.01, "center {:?}", c.center);
+        assert!(c.center.y.abs() < 0.01, "center {:?}", c.center);
+        assert!(c.radial_rms.sqrt() < 1e-3, "radial rms {}", c.radial_rms);
+    }
+
+    #[test]
+    fn circle_fit_noisy_cylinder_wall() {
+        // Full 360 degree bore wall with scanner-like noise (+/- 0.05 mm).
+        let mut rng = Rng::new(11);
+        let mut pts = Vec::new();
+        for _ in 0..4000 {
+            let a = rng.f32() * 2.0 * std::f32::consts::PI;
+            let z = rng.f32() * 25.0;
+            let n = |rng: &mut Rng| (rng.f32() - 0.5) * 0.1;
+            pts.push([
+                3.0 + 9.0 * a.cos() + n(&mut rng),
+                -7.0 + 9.0 * a.sin() + n(&mut rng),
+                z + n(&mut rng),
+            ]);
+        }
+        let c = fit_circle(&pts).unwrap();
+        assert!(c.cylinder, "noisy bore wall must be recognized");
+        assert!(c.normal.z.abs() > 0.999, "normal {:?}", c.normal);
+        assert!((c.radius - 9.0).abs() < 0.02, "radius {}", c.radius);
+        assert!((c.center.x - 3.0).abs() < 0.02, "center {:?}", c.center);
+        assert!((c.center.y + 7.0).abs() < 0.02, "center {:?}", c.center);
     }
 
     fn symmetric_test_part() -> Mesh {
@@ -623,6 +743,7 @@ mod tests {
                 plane_rms: 0.001,
                 radial_rms: 0.002,
                 radial_max: 0.003,
+                cylinder: false,
             },
             visible: true,
             color: [0.2, 0.8, 0.3, 1.0],
@@ -688,6 +809,7 @@ mod tests {
                 plane_rms: 0.001,
                 radial_rms: 0.001,
                 radial_max: 0.002,
+                cylinder: false,
             },
             visible: true,
             color: [0.0, 1.0, 0.0, 1.0],
@@ -1223,6 +1345,671 @@ mod tests {
         assert!(app.current.is_some());
         assert!(app.original.is_some());
         assert!(app.status.contains("Centered at global origin"));
+    }
+
+    #[test]
+    fn face_groups_box_six_planes() {
+        use crate::geom::segment::{GroupKind, segment_faces};
+        use crate::geom::topology::MeshTopology;
+
+        let m = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let topo = MeshTopology::build(&m);
+        let (groups, ids) = segment_faces(&m, &topo, 45.0, 1, 0.0015);
+        assert_eq!(groups.len(), 6, "each box face must be its own group");
+        assert!(ids.iter().all(|&g| g >= 0), "every face must be grouped");
+        assert!(groups.iter().all(|g| g.kind == GroupKind::Plane));
+        assert!(groups.iter().all(|g| g.tris.len() == 2));
+    }
+
+    #[test]
+    fn face_groups_cylinder_classification() {
+        use crate::geom::segment::{GroupKind, segment_faces};
+        use crate::geom::topology::MeshTopology;
+
+        let m = cylinder_wall_mesh(10.0, 40.0, 6, 32);
+        let topo = MeshTopology::build(&m);
+        let (groups, ids) = segment_faces(&m, &topo, 45.0, 4, 0.0015);
+        assert_eq!(groups.len(), 1, "cylinder wall must be a single group");
+        assert_eq!(groups[0].kind, GroupKind::Cylinder);
+        assert!(
+            (groups[0].radius - 10.0).abs() < 0.05,
+            "radius {}",
+            groups[0].radius
+        );
+        assert!(groups[0].normal.dot(Vec3::Z).abs() > 0.99);
+        assert_eq!(
+            ids.iter().filter(|&&g| g == 0).count(),
+            m.triangle_count()
+        );
+    }
+
+    #[test]
+    fn face_groups_sphere_classification() {
+        use crate::geom::segment::{GroupKind, segment_faces};
+        use crate::geom::topology::MeshTopology;
+
+        let m = sphere_mesh(5.0, 24, 48);
+        let topo = MeshTopology::build(&m);
+        let (groups, _) = segment_faces(&m, &topo, 60.0, 4, 0.0015);
+        assert!(
+            groups.len() <= 3,
+            "sphere should form one main group, got {}",
+            groups.len()
+        );
+        let big = groups.iter().max_by_key(|g| g.tris.len()).unwrap();
+        assert_eq!(big.kind, GroupKind::Sphere);
+        assert!((big.radius - 5.0).abs() < 0.05, "radius {}", big.radius);
+    }
+
+    #[test]
+    fn face_groups_app_workflow() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 4.0, 2.0, 2.0));
+        app.current = Some(m.clone());
+        app.original = Some(m);
+
+        app.detect_face_groups();
+        assert_eq!(app.face_groups.len(), 6);
+        assert!(app.groups_show);
+        assert_eq!(
+            app.group_ids.len(),
+            app.current.as_ref().unwrap().triangle_count()
+        );
+
+        let id = app.face_groups[0].id;
+        app.select_group_faces(id, false);
+        assert_eq!(app.sel_count, app.face_groups[0].tris.len());
+
+        // Transforming the mesh must transform the group fits as well.
+        let q = glam::Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2);
+        let before = app.face_groups[0].point;
+        app.apply_transform(q, Vec3::new(1.0, 0.0, 0.0));
+        let after = app.face_groups[0].point;
+        assert!(
+            (after - (q * before + Vec3::X)).length() < 1e-4,
+            "group plane point must be transformed"
+        );
+
+        // Fitting a plane from a group pushes a managed plane object.
+        let planes_before = app.planes.len();
+        app.fit_group_plane(id);
+        assert_eq!(app.planes.len(), planes_before + 1);
+
+        // Mesh topology changes must invalidate the groups.
+        let curr = (*app.current.clone().unwrap()).clone();
+        app.set_mesh_modified(curr, "test modification".to_string());
+        assert!(app.face_groups.is_empty());
+        assert!(app.group_ids.is_empty());
+    }
+
+    #[test]
+    fn double_click_selects_complete_group() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        app.current = Some(m.clone());
+        app.original = Some(m);
+        app.detect_face_groups();
+
+        // Double-click on triangle 0 -> the whole group (2 faces) is selected.
+        app.select_region_under(0);
+        assert_eq!(app.sel_count, 2);
+        let gid = app.group_ids[0];
+        let expected: std::collections::HashSet<u32> = app
+            .face_groups
+            .iter()
+            .find(|g| g.id == gid)
+            .unwrap()
+            .tris
+            .iter()
+            .copied()
+            .collect();
+        let selected: std::collections::HashSet<u32> = (0..app.sel.len())
+            .filter(|&t| app.sel[t] > 0)
+            .map(|t| t as u32)
+            .collect();
+        assert_eq!(selected, expected);
+
+        // Additive mode (default): double-click on another group keeps the
+        // existing selection and adds the new group's faces.
+        assert!(app.group_sel_additive);
+        let other_tri = (0..app.group_ids.len())
+            .find(|&t| app.group_ids[t] != gid)
+            .unwrap() as u32;
+        app.select_region_under(other_tri);
+        assert_eq!(app.sel_count, 4, "additive double-click must merge selections");
+
+        // Replace mode: double-click replaces the selection.
+        app.group_sel_additive = false;
+        app.select_region_under(0);
+        assert_eq!(app.sel_count, 2);
+
+        // Without face groups the double-click falls back to a
+        // crease-angle region (here: the flat face under triangle 0).
+        app.clear_face_groups();
+        app.sel = std::sync::Arc::new(vec![0u8; 12]);
+        app.sel_count = 0;
+        app.select_region_under(0);
+        assert_eq!(app.sel_count, 2);
+    }
+
+    #[test]
+    fn group_filter_matches_only_kind() {
+        use crate::app::{GroupFilter, group_matches_filter};
+        use crate::geom::segment::GroupKind;
+
+        assert!(group_matches_filter(GroupKind::Plane, GroupFilter::All));
+        assert!(group_matches_filter(GroupKind::Freeform, GroupFilter::All));
+        assert!(group_matches_filter(GroupKind::Plane, GroupFilter::Plane));
+        assert!(!group_matches_filter(GroupKind::Cylinder, GroupFilter::Plane));
+        assert!(group_matches_filter(GroupKind::Cylinder, GroupFilter::Cylinder));
+        assert!(!group_matches_filter(GroupKind::Plane, GroupFilter::Cylinder));
+        assert!(group_matches_filter(GroupKind::Sphere, GroupFilter::Sphere));
+        assert!(!group_matches_filter(GroupKind::Sphere, GroupFilter::Freeform));
+        assert!(group_matches_filter(GroupKind::Freeform, GroupFilter::Freeform));
+        assert!(!group_matches_filter(GroupKind::Cylinder, GroupFilter::Sphere));
+    }
+
+    /// Curved grid patch mesh (wavy height field over the XY plane).
+    fn wavy_patch_mesh(nx: usize, ny: usize) -> Mesh {
+        let mut positions = Vec::new();
+        for j in 0..=ny {
+            for i in 0..=nx {
+                let x = i as f32;
+                let y = j as f32;
+                let z = (x * 0.35).sin() * (y * 0.3).cos() * 2.0;
+                positions.push([x, y, z]);
+            }
+        }
+        let mut indices = Vec::new();
+        for j in 0..ny {
+            for i in 0..nx {
+                let a = (j * (nx + 1) + i) as u32;
+                let b = a + 1;
+                let c = a + (nx + 1) as u32;
+                let d = c + 1;
+                indices.extend_from_slice(&[a, b, d, a, d, c]);
+            }
+        }
+        Mesh::from_indexed(positions, indices)
+    }
+
+    #[test]
+    fn freeform_fit_tilted_plane_with_overshoot() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform};
+
+        // Exactly planar, tilted selection: the freeform must reproduce the
+        // plane everywhere, including the overshoot region.
+        let mut pts = Vec::new();
+        for i in 0..40 {
+            for j in 0..40 {
+                let (x, y) = (i as f32, j as f32);
+                pts.push([x, y, 0.5 * x + 0.25 * y]);
+            }
+        }
+        let params = FreeformParams {
+            overshoot_mm: 5.0,
+            extend: FreeformExtend::Curvature,
+            resolution: 80,
+            smoothness: 0,
+        };
+        let fit = fit_freeform(&pts, &params).unwrap();
+        assert!(fit.rms < 0.05, "rms {}", fit.rms);
+
+        // The surface extends past the data footprint (39 x 39 in XY).
+        let bb = fit.surface.bbox();
+        assert!(
+            bb.extent().x >= 44.0,
+            "surface must overshoot the selection, extent {}",
+            bb.extent().x
+        );
+
+        // Every vertex (also the extended ones) must lie on the plane.
+        for p in &fit.surface.positions {
+            let z_expected = 0.5 * p[0] + 0.25 * p[1];
+            assert!(
+                (p[2] - z_expected).abs() < 0.1,
+                "vertex {:?} not on plane (expected z = {z_expected})",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn freeform_curvature_vs_slope_extension() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform};
+
+        // Patch of a cylinder wall (R = 10, axis Y), arc a in [-0.5, 0.5].
+        let mut pts = Vec::new();
+        for i in 0..40 {
+            let a = -0.5 + i as f32 / 39.0;
+            for j in 0..30 {
+                let y = j as f32 * 10.0 / 29.0;
+                pts.push([10.0 * a.sin(), y, 10.0 * a.cos() - 10.0]);
+            }
+        }
+
+        let make = |extend| FreeformParams {
+            overshoot_mm: 2.0,
+            extend,
+            resolution: 100,
+            smoothness: 0,
+        };
+
+        // Max radial error against the true cylinder for vertices beyond the
+        // data arc range (|x| > 10 * sin(0.5) = 4.795) along the arc
+        // extension band. Corner regions (x and y both outside) are excluded:
+        // extrapolating into a corner diagonal is inherently approximate.
+        let radial_err = |fit: &crate::geom::freeform::FreeformFitData| {
+            fit.surface
+                .positions
+                .iter()
+                .filter(|p| p[0].abs() > 5.0 && p[1] >= 2.0 && p[1] <= 8.0)
+                .map(|p| {
+                    let r = (p[0] * p[0] + (p[2] + 10.0) * (p[2] + 10.0)).sqrt();
+                    (r - 10.0).abs()
+                })
+                .fold(0.0f32, f32::max)
+        };
+
+        let fit_curv = fit_freeform(&pts, &make(FreeformExtend::Curvature)).unwrap();
+        assert!(fit_curv.rms < 0.15, "rms {}", fit_curv.rms);
+        let err_curv = radial_err(&fit_curv);
+
+        let fit_slope = fit_freeform(&pts, &make(FreeformExtend::Slope)).unwrap();
+        let err_slope = radial_err(&fit_slope);
+        assert!(
+            err_curv < 0.15,
+            "curvature continuation must track the cylinder, max err {err_curv}"
+        );
+        assert!(
+            err_slope > err_curv + 0.10,
+            "slope continuation must deviate more than curvature ({err_slope} vs {err_curv})"
+        );
+
+        // Spike guard: even in the corner regions the surface must stay
+        // within a sane band around the true cylinder (no wild extrapolation).
+        let err_corner = |fit: &crate::geom::freeform::FreeformFitData| {
+            fit.surface
+                .positions
+                .iter()
+                .filter(|p| p[1] < -0.5 || p[1] > 10.5)
+                .map(|p| {
+                    let r = (p[0] * p[0] + (p[2] + 10.0) * (p[2] + 10.0)).sqrt();
+                    (r - 10.0).abs()
+                })
+                .fold(0.0f32, f32::max)
+        };
+        assert!(
+            err_corner(&fit_curv) < 0.5,
+            "corner extrapolation must stay sane, got {}",
+            err_corner(&fit_curv)
+        );
+    }
+
+    #[test]
+    fn freeform_app_fit_refit_delete_workflow() {
+        use crate::geom::freeform::FreeformParams;
+
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(wavy_patch_mesh(30, 30));
+        let tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m);
+        app.sel = std::sync::Arc::new(vec![1u8; tris]);
+        app.sel_count = tris;
+
+        app.fit_freeform_from_selection();
+        assert_eq!(app.freeforms.len(), 1);
+        assert!(app.freeform_job.is_some(), "fit job must be scheduled");
+        assert_eq!(app.freeforms[0].name, "Freeform 1");
+        assert_eq!(app.selected_freeform_id, Some(app.freeforms[0].id));
+
+        // Pump the async worker until the fit lands.
+        let ctx = eframe::egui::Context::default();
+        let mut waited = 0;
+        while app.freeform_job.is_some() && waited < 2400 {
+            app.handle_worker(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 1;
+        }
+        assert!(app.freeform_job.is_none(), "fit job did not finish");
+        assert!(app.freeforms[0].surface.is_some(), "surface must be fitted");
+        assert!(app.freeforms[0].boundary.len() > 0, "boundary must exist");
+        assert!(app.freeforms[0].rms >= 0.0);
+
+        // Changing parameters schedules a refit with the new values.
+        let id = app.freeforms[0].id;
+        let old = app.freeforms[0].params;
+        app.set_freeform_params(
+            id,
+            FreeformParams {
+                overshoot_mm: old.overshoot_mm + 2.0,
+                ..old
+            },
+        );
+        assert!(app.freeform_job.is_some(), "refit must be scheduled");
+        let submitted_params = app.freeforms[0].params;
+        assert!((submitted_params.overshoot_mm - (old.overshoot_mm + 2.0)).abs() < 1e-6);
+
+        // Undo restores the state before the freeform was created.
+        app.undo();
+        assert!(app.freeforms.is_empty(), "undo must remove the freeform");
+    }
+
+    #[test]
+    fn freeform_second_fit_queues_while_first_runs() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(wavy_patch_mesh(24, 24));
+        let tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m);
+        app.sel = std::sync::Arc::new(vec![1u8; tris]);
+        app.sel_count = tris;
+
+        app.fit_freeform_from_selection();
+        assert!(app.freeform_job.is_some(), "first fit must hold the job slot");
+
+        // A second fit while the first job runs must be queued, not dropped.
+        app.fit_freeform_from_selection();
+        assert_eq!(app.freeforms.len(), 2);
+        assert!(
+            app.freeforms[1].refit_pending,
+            "second fit must be queued until the first finishes"
+        );
+        assert_eq!(
+            app.freeform_job.unwrap().1,
+            app.freeforms[0].id,
+            "first job keeps the slot"
+        );
+
+        // Pump until both surfaces are fitted.
+        let ctx = eframe::egui::Context::default();
+        let mut waited = 0;
+        while (app.freeform_job.is_some() || app.freeforms.iter().any(|f| f.refit_pending))
+            && waited < 2400
+        {
+            app.handle_worker(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 1;
+        }
+        assert!(
+            app.freeforms.iter().all(|f| f.surface.is_some()),
+            "both surfaces must be fitted"
+        );
+        assert!(app.freeform_job.is_none());
+        assert!(app.freeforms.iter().all(|f| !f.refit_pending));
+    }
+
+    #[test]
+    fn freeform_overshoot_grows_surface_footprint() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform};
+
+        // Wavy height field; more overshoot must produce a larger surface.
+        let mut pts = Vec::new();
+        for i in 0..60 {
+            for j in 0..60 {
+                let (x, y) = (i as f32 * 0.5, j as f32 * 0.5);
+                pts.push([x, y, (x * 0.4).sin() * (y * 0.35).cos() * 1.5]);
+            }
+        }
+        let p0 = FreeformParams {
+            overshoot_mm: 0.0,
+            extend: FreeformExtend::Curvature,
+            resolution: 90,
+            smoothness: 0,
+        };
+        let p1 = FreeformParams {
+            overshoot_mm: 4.0,
+            ..p0
+        };
+        let fit0 = fit_freeform(&pts, &p0).unwrap();
+        let fit1 = fit_freeform(&pts, &p1).unwrap();
+        let area = |fit: &crate::geom::freeform::FreeformFitData| {
+            let bb = fit.surface.bbox();
+            bb.extent().x * bb.extent().y
+        };
+        let (area0, area1) = (area(&fit0), area(&fit1));
+        assert!(
+            area1 > area0 * 1.25,
+            "overshoot must grow the surface: {area0} vs {area1}"
+        );
+        assert!(fit1.rms < 0.2, "rms {}", fit1.rms);
+    }
+
+    #[test]
+    fn freeform_defaults_are_slope_and_smoothed() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams};
+        let p = FreeformParams::default_for(50.0);
+        assert_eq!(p.extend, FreeformExtend::Slope, "Slope must be the default");
+        assert!(p.smoothness >= 1, "light smoothing by default");
+        assert_eq!(p.resolution, 120);
+    }
+
+    #[test]
+    fn freeform_smoothness_flattens_noise() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform_grid};
+
+        // Noisy height field: smoothing passes must reduce grid roughness.
+        let mut pts = Vec::new();
+        let mut rng = crate::rng::Rng::new(5);
+        for i in 0..40 {
+            for j in 0..40 {
+                let (x, y) = (i as f32 * 0.5, j as f32 * 0.5);
+                pts.push([
+                    x,
+                    y,
+                    0.5 * (x * 0.3).sin() + (rng.f32() - 0.5) * 0.2,
+                ]);
+            }
+        }
+        let make = |smoothness| FreeformParams {
+            overshoot_mm: 2.0,
+            extend: FreeformExtend::Slope,
+            resolution: 80,
+            smoothness,
+        };
+        // Roughness = sum of squared second differences of the height grid.
+        let roughness = |grid: &crate::geom::freeform::FreeformGrid| {
+            let (nx, ny) = (grid.nx, grid.ny);
+            let h = &grid.heights;
+            let mut e = 0.0f32;
+            for j in 1..ny {
+                for i in 1..nx {
+                    let idx = j * (nx + 1) + i;
+                    let d2 = h[idx - 1] - 2.0 * h[idx] + h[idx + 1];
+                    e += d2 * d2;
+                }
+            }
+            e
+        };
+        let g0 = fit_freeform_grid(&pts, &make(0)).unwrap();
+        let g8 = fit_freeform_grid(&pts, &make(8)).unwrap();
+        assert!(
+            roughness(&g8) < roughness(&g0) * 0.5,
+            "smoothing must reduce grid roughness ({} vs {})",
+            roughness(&g8),
+            roughness(&g0)
+        );
+    }
+
+    #[test]
+    fn freeform_bicubic_interpolates_grid() {
+        use crate::geom::freeform::{
+            FreeformExtend, FreeformParams, bicubic_control_net, eval_bicubic,
+            fit_freeform_grid,
+        };
+
+        let mut pts = Vec::new();
+        for i in 0..24 {
+            for j in 0..18 {
+                let (x, y) = (i as f32, j as f32);
+                pts.push([x, y, (x * 0.3).sin() * (y * 0.25).cos() * 2.0]);
+            }
+        }
+        let params = FreeformParams {
+            overshoot_mm: 3.0,
+            extend: FreeformExtend::Curvature,
+            resolution: 40,
+            smoothness: 1,
+        };
+        let grid = fit_freeform_grid(&pts, &params).unwrap();
+        let net = bicubic_control_net(&grid);
+        assert_eq!(net.cps.len(), grid.ny + 1);
+        assert_eq!(net.cps[0].len(), grid.nx + 1);
+
+        // The B-spline surface must pass exactly through the grid nodes.
+        for (i, j) in [(0usize, 0usize), (grid.nx, 0), (0, grid.ny), (grid.nx, grid.ny),
+                       (grid.nx / 2, grid.ny / 2), (grid.nx / 3, 2 * grid.ny / 3)] {
+            let expected = grid.origin
+                + grid.u * (grid.x0 + i as f32 * grid.gw)
+                + grid.v * (grid.y0 + j as f32 * grid.gh)
+                + grid.normal * grid.heights[j * (grid.nx + 1) + i];
+            let u = i as f64 / grid.nx as f64;
+            let v = j as f64 / grid.ny as f64;
+            let got = eval_bicubic(&net, u, v);
+            assert!(
+                (got - expected).length() < 1e-3,
+                "node ({i},{j}): got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn freeform_step_export_structure() {
+        use crate::geom::freeform::{
+            FreeformExtend, FreeformParams, bicubic_control_net, fit_freeform_grid,
+        };
+
+        let mut pts = Vec::new();
+        for i in 0..20 {
+            for j in 0..16 {
+                let (x, y) = (i as f32, j as f32);
+                pts.push([x, y, (x * 0.35).sin() * 1.5]);
+            }
+        }
+        let params = FreeformParams {
+            overshoot_mm: 2.0,
+            extend: FreeformExtend::Slope,
+            resolution: 24,
+            smoothness: 2,
+        };
+        let grid = fit_freeform_grid(&pts, &params).unwrap();
+        let net = bicubic_control_net(&grid);
+        let content = crate::export::step::generate_freeform_step("Freeform 1", &net);
+
+        assert!(content.contains("ISO-10303-21;"));
+        assert!(content.contains("B_SPLINE_SURFACE_WITH_KNOTS"));
+        assert!(content.contains("B_SPLINE_CURVE_WITH_KNOTS"));
+        assert!(content.contains("ADVANCED_FACE('Freeform 1'"));
+        assert!(content.contains("EDGE_LOOP"));
+        assert!(content.contains("FACE_OUTER_BOUND"));
+        assert!(content.contains("OPEN_SHELL"));
+        assert!(content.contains("END-ISO-10303-21;"));
+        // One cartesian point per control point, no duplicates needed.
+        let cp_count = (grid.nx + 1) * (grid.ny + 1);
+        let point_count = content.matches("CARTESIAN_POINT").count();
+        assert_eq!(point_count, cp_count, "one point per control point expected");
+        // Clamped bicubic knot summary: multiplicities start and end with 4.
+        let surface_line = content
+            .lines()
+            .find(|l| l.contains("B_SPLINE_SURFACE_WITH_KNOTS"))
+            .expect("surface entity line");
+        let after = surface_line
+            .split(".UNSPECIFIED.,.F.,.F.,.F.,")
+            .nth(1)
+            .expect("multiplicity lists");
+        let u_mults = after
+            .split('(')
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or_default();
+        assert!(
+            u_mults.starts_with("4,") && u_mults.ends_with(",4"),
+            "clamped multiplicities expected, got ({u_mults})"
+        );
+        // Balanced parentheses on every entity line (cheap STEP sanity).
+        for line in content.lines() {
+            if line.starts_with('#') {
+                let opens = line.matches('(').count();
+                let closes = line.matches(')').count();
+                assert_eq!(
+                    opens,
+                    closes,
+                    "unbalanced parens in STEP line: {line}"
+                );
+            }
+        }
+        // Curve form: 1 form flag + 2 logicals (closed, self_intersect).
+        let curve_line = content
+            .lines()
+            .find(|l| l.contains("B_SPLINE_CURVE_WITH_KNOTS"))
+            .unwrap();
+        assert!(curve_line.contains(".UNSPECIFIED.,.F.,.F.,("));
+    }
+
+    #[test]
+    fn freeform_curvature_spikes_clamped_on_thin_strip() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform};
+
+        // Nearly collinear thin strip (e.g. a narrow scan band). The
+        // quadratic fit is degenerate across the strip; without the bend
+        // clamp this spikes wildly in the overshoot region.
+        let mut rng = crate::rng::Rng::new(42);
+        let mut pts = Vec::new();
+        for i in 0..60 {
+            let x = i as f32 * 0.35;
+            let y = (rng.f32() - 0.5) * 0.02;
+            let z = 0.02 * x + (rng.f32() - 0.5) * 0.004;
+            pts.push([x, y, z]);
+        }
+        let params = FreeformParams {
+            overshoot_mm: 2.0,
+            extend: FreeformExtend::Curvature,
+            resolution: 64,
+            smoothness: 0,
+        };
+        let fit = fit_freeform(&pts, &params).unwrap();
+        assert!(!fit.surface.positions.is_empty());
+        for p in &fit.surface.positions {
+            let z_expected = 0.02 * p[0];
+            assert!(
+                (p[2] - z_expected).abs() < 0.5,
+                "thin-strip fit must stay near the strip plane, got {p:?} \
+                 (expected z = {z_expected})"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore] // performance smoke test: run with `cargo test -- --ignored`
+    fn freeform_perf_worst_case() {
+        use crate::geom::freeform::{FreeformExtend, FreeformParams, fit_freeform};
+
+        // Dense 96k point cloud (typical sub-sampled selection cap) at the
+        // maximum resolution. Must stay interactive even in debug builds.
+        let mut pts = Vec::with_capacity(96_000);
+        for i in 0..400 {
+            for j in 0..240 {
+                let (x, y) = (i as f32 * 0.1, j as f32 * 0.1);
+                let z = (x * 0.1).sin() * (y * 0.12).cos() * 3.0 + 0.01 * ((i + j) % 100) as f32;
+                pts.push([x, y, z]);
+            }
+        }
+        let params = FreeformParams {
+            overshoot_mm: 5.0,
+            extend: FreeformExtend::Curvature,
+            resolution: 320,
+            smoothness: 2,
+        };
+        let t0 = std::time::Instant::now();
+        let fit = fit_freeform(&pts, &params).unwrap();
+        let dt = t0.elapsed();
+        println!(
+            "worst-case fit: {} points, {} tris, {dt:?}",
+            pts.len(),
+            fit.surface.triangle_count()
+        );
+        assert!(dt.as_millis() < 2000, "fit took {dt:?}");
     }
 }
 

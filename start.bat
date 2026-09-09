@@ -1,6 +1,9 @@
 @echo off
 setlocal
 set "APPDIR=%~dp0"
+
+rem Rustup default install location (in case PATH is not set in this shell)
+set "PATH=%PATH%;%USERPROFILE%\.cargo\bin"
 set "EXE=%APPDIR%target\release\ScanImprover.exe"
 
 if not exist "%EXE%" (

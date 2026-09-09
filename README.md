@@ -29,6 +29,10 @@ When working with 3D scan data for reverse engineering in CAD software, two majo
   - Plane fitting (RANSAC / least-squares)
   - Cylinder and sphere fitting
   - Coordinate system realignment (Origin, X/Y/Z primary directions)
+- **Automatic Face Groups:**
+  - Region-growing segmentation with live crease-angle preview
+  - Automatic classification as plane / cylinder / sphere with fitted parameters
+  - Distinct or by-type coloring to quickly find functional surfaces
 - **Selection & Editing Tools:**
   - Brush selection, point picking, and connected component filtering
   - Crop / cut / delete unwanted artifacts and noise

@@ -1,6 +1,7 @@
 use crate::decimate;
 use crate::geom::bvh::Bvh;
 use crate::geom::distance::{self, Deviation};
+use crate::geom::freeform::{FreeformFitData, FreeformParams, fit_freeform};
 use crate::geom::symmetry::{self, SymPlane};
 use crate::mesh::Mesh;
 use glam::Vec3;
@@ -44,6 +45,12 @@ pub enum Job {
         id: u64,
         mesh: Arc<Mesh>,
     },
+    FreeformFit {
+        id: u64,
+        freeform_id: u64,
+        points: Arc<Vec<[f32; 3]>>,
+        params: FreeformParams,
+    },
 }
 
 pub enum JobResult {
@@ -76,6 +83,11 @@ pub enum JobResult {
     BvhReady {
         id: u64,
         bvh: Arc<Bvh>,
+    },
+    FreeformFit {
+        id: u64,
+        freeform_id: u64,
+        data: Result<FreeformFitData, String>,
     },
 }
 
@@ -174,6 +186,22 @@ impl Worker {
     pub fn submit_bvh_build(&mut self, mesh: Arc<Mesh>) -> u64 {
         let id = self.alloc_id();
         let _ = self.tx.send(Job::BvhBuild { id, mesh });
+        id
+    }
+
+    pub fn submit_freeform_fit(
+        &mut self,
+        freeform_id: u64,
+        points: Arc<Vec<[f32; 3]>>,
+        params: FreeformParams,
+    ) -> u64 {
+        let id = self.alloc_id();
+        let _ = self.tx.send(Job::FreeformFit {
+            id,
+            freeform_id,
+            points,
+            params,
+        });
         id
     }
 
@@ -324,5 +352,15 @@ fn run(job: Job) -> JobResult {
             let bvh = Arc::new(Bvh::new(&mesh.positions, &mesh.indices));
             JobResult::BvhReady { id, bvh }
         }
+        Job::FreeformFit {
+            id,
+            freeform_id,
+            points,
+            params,
+        } => JobResult::FreeformFit {
+            id,
+            freeform_id,
+            data: fit_freeform(&points, &params),
+        },
     }
 }
