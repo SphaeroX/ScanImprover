@@ -49,6 +49,40 @@ pub fn render_selection_hud(app: &mut App, ui: &mut egui::Ui, viewport_rect: egu
                         ui.separator();
                         ui.add_space(4.0);
 
+                        // Bridge shortcut button when 2 separate clusters are selected
+                        let mut has_two_clusters = false;
+                        if let Some(curr) = app.current.as_ref() {
+                            let topo = app.topology.clone();
+                            if crate::geom::bridge::detect_selection_clusters(curr, &app.sel, topo.as_deref()).is_ok() {
+                                has_two_clusters = true;
+                            }
+                        }
+
+                        if has_two_clusters {
+                            let bridge_btn = egui::Button::new(
+                                egui::RichText::new("🌉 Bridge")
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(140, 240, 190)),
+                            )
+                            .fill(egui::Color32::from_rgba_unmultiplied(35, 140, 95, 45))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgba_unmultiplied(50, 180, 120, 90),
+                            ))
+                            .corner_radius(10.0);
+
+                            if ui
+                                .add(bridge_btn)
+                                .on_hover_text("Open Contour Bridge tool & view bridge preview")
+                                .clicked()
+                            {
+                                app.active_section = Some(crate::ui::ToolSection::Selection);
+                                app.set_bridge_preview_active(true);
+                            }
+
+                            ui.add_space(4.0);
+                        }
+
                         // Hide button
                         let hide_btn = egui::Button::new(
                             egui::RichText::new("👁 Hide")

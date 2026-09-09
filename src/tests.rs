@@ -2273,6 +2273,255 @@ mod tests {
         let hit2 = ray_pick(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0).expect("Should hit rear box");
         assert!(hit2.pos.z > 8.0, "Hit should penetrate and be on rear box (z > 8.0), got z = {}", hit2.pos.z);
     }
+
+    #[test]
+    fn test_bridge_cluster_detection_and_generation() {
+        use crate::geom::bridge::{
+            apply_bridge_patch, detect_selection_clusters, generate_bridge_patch, BridgeConfig,
+            BridgeMethod,
+        };
+        use crate::geom::repair::analyze_mesh;
+
+        // Create a mesh with a gap: two disconnected planar strips facing each other across x = [10.0, 20.0]
+        // Strip 1: x in [0, 10], y in [0, 10]
+        // Strip 2: x in [20, 30], y in [0, 10]
+        // Connect them at the top (y=10) and bottom (y=0) to form a single loop hole in the center:
+        // A ring / frame of quads enclosing an empty region in the middle!
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+
+        // 4 corners of outer frame: [0, 30] x [0, 30]
+        // Inner hole: [10, 20] x [5, 25]
+        // Let's make a simple quad strip with a gap:
+        // Strip A: vertices 0, 1, 2, 3 (x=0 to 5, y=0 to 10)
+        // Strip B: vertices 4, 5, 6, 7 (x=15 to 20, y=0 to 10)
+        // Gap is between x=5 and x=15.
+        // Strip A:
+        positions.push([0.0, 0.0, 0.0]); // 0
+        positions.push([5.0, 0.0, 0.0]); // 1
+        positions.push([5.0, 10.0, 0.0]); // 2
+        positions.push([0.0, 10.0, 0.0]); // 3
+        indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]); // tris 0, 1
+
+        // Strip B:
+        positions.push([15.0, 0.0, 0.0]); // 4
+        positions.push([20.0, 0.0, 0.0]); // 5
+        positions.push([20.0, 10.0, 0.0]); // 6
+        positions.push([15.0, 10.0, 0.0]); // 7
+        indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]); // tris 2, 3
+
+        let mesh = Mesh::from_indexed(positions, indices);
+        assert_eq!(mesh.triangle_count(), 4);
+
+        // Select strip A (tris 0, 1) and strip B (tris 2, 3)
+        let mut sel = vec![0u8; 4];
+        sel[0] = 1;
+        sel[1] = 1;
+        sel[2] = 1;
+        sel[3] = 1;
+
+        // Detect clusters
+        let (ca, cb) = detect_selection_clusters(&mesh, &sel, None)
+            .expect("Should detect 2 clusters");
+        assert_eq!(ca.triangles.len(), 2);
+        assert_eq!(cb.triangles.len(), 2);
+        assert!(ca.boundary_chain.len() >= 2);
+        assert!(cb.boundary_chain.len() >= 2);
+
+        // Generate Linear bridge
+        let mut config = BridgeConfig::default();
+        config.method = BridgeMethod::Linear;
+        config.segments = 4;
+        let patch_linear = generate_bridge_patch(&mesh, &ca, &cb, config)
+            .expect("Bridge patch generation should succeed");
+        assert!(patch_linear.new_positions.len() > 0);
+        assert!(patch_linear.new_indices.len() > 0);
+        assert_eq!(patch_linear.new_indices.len() % 3, 0);
+
+        // Generate Cubic Hermite curved bridge
+        config.method = BridgeMethod::CubicHermite;
+        config.tension = 1.0;
+        config.segments = 6;
+        let patch_hermite = generate_bridge_patch(&mesh, &ca, &cb, config)
+            .expect("Cubic Hermite bridge should succeed");
+        assert!(patch_hermite.new_positions.len() > 0);
+        assert!(patch_hermite.new_indices.len() > 0);
+
+        // Apply bridge patch to mesh
+        let mut bridged_mesh = mesh.clone();
+        apply_bridge_patch(&mut bridged_mesh, &patch_hermite);
+        assert!(bridged_mesh.triangle_count() > mesh.triangle_count());
+
+        // Check health of bridged mesh
+        let health = analyze_mesh(&bridged_mesh);
+        for t in 0..bridged_mesh.triangle_count() {
+            let i0 = bridged_mesh.indices[3 * t];
+            let i1 = bridged_mesh.indices[3 * t + 1];
+            let i2 = bridged_mesh.indices[3 * t + 2];
+            let p0 = Vec3::from(bridged_mesh.positions[i0 as usize]);
+            let p1 = Vec3::from(bridged_mesh.positions[i1 as usize]);
+            let p2 = Vec3::from(bridged_mesh.positions[i2 as usize]);
+            let area_sq = (p1 - p0).cross(p2 - p0).length_squared();
+            if i0 == i1 || i1 == i2 || i2 == i0 || area_sq < 1e-14 {
+                println!("Degenerate tri {}: ({}, {}, {}), area_sq: {:e}, p0: {:?}, p1: {:?}, p2: {:?}", t, i0, i1, i2, area_sq, p0, p1, p2);
+            }
+        }
+        assert_eq!(health.non_manifold_edges, 0, "Bridged mesh must be manifold");
+        assert_eq!(health.degenerate_faces, 0);
+    }
+
+    #[test]
+    fn test_bridge_splits_single_hole_into_two() {
+        use crate::geom::bridge::{
+            apply_bridge_patch, detect_selection_clusters, generate_bridge_patch, BridgeConfig,
+        };
+        use crate::geom::hole_detect::detect_holes;
+        use crate::geom::repair::analyze_mesh;
+
+        // Create a planar frame with 1 big central hole:
+        // Outer box: [-10, 10] x [-10, 10]
+        // Inner hole: [-4, 4] x [-4, 4]
+        // Formed by 4 quads (North, South, East, West):
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+
+        // Outer vertices (0..8)
+        let outer = [
+            [-10.0, -10.0, 0.0], // 0: SW
+            [0.0, -10.0, 0.0],   // 1: S_mid
+            [10.0, -10.0, 0.0],  // 2: SE
+            [10.0, 0.0, 0.0],    // 3: E_mid
+            [10.0, 10.0, 0.0],   // 4: NE
+            [0.0, 10.0, 0.0],    // 5: N_mid
+            [-10.0, 10.0, 0.0],  // 6: NW
+            [-10.0, 0.0, 0.0],   // 7: W_mid
+        ];
+        // Inner vertices (8..12)
+        let inner = [
+            [-4.0, -4.0, 0.0], // 8: inner SW
+            [4.0, -4.0, 0.0],  // 9: inner SE
+            [4.0, 4.0, 0.0],   // 10: inner NE
+            [-4.0, 4.0, 0.0],  // 11: inner NW
+        ];
+        for p in outer {
+            positions.push(p);
+        }
+        for p in inner {
+            positions.push(p);
+        }
+
+        // South Quad: (0, 2, 9, 8) -> (0, 1, 2) etc.
+        // Let's create South quad (0, 2, 9, 8), North quad (11, 10, 4, 6), West quad (0, 8, 11, 6), East quad (9, 2, 4, 10)
+        // South:
+        indices.extend_from_slice(&[0, 2, 9, 0, 9, 8]); // tris 0, 1
+        // North:
+        indices.extend_from_slice(&[11, 10, 4, 11, 4, 6]); // tris 2, 3
+        // West:
+        indices.extend_from_slice(&[0, 8, 11, 0, 11, 6]); // tris 4, 5
+        // East:
+        indices.extend_from_slice(&[9, 2, 4, 9, 4, 10]); // tris 6, 7
+
+        let mesh = Mesh::from_indexed(positions, indices);
+        let initial_holes = detect_holes(&mesh);
+        // Outer boundary is 1 loop, inner hole is 1 loop -> exactly 2 loops, with 1 interior hole!
+        assert_eq!(initial_holes.len(), 2);
+
+        // Select the North inner face (tris 2, 3) and South inner face (tris 0, 1)
+        let mut sel = vec![0u8; mesh.triangle_count()];
+        sel[0] = 1; // South
+        sel[1] = 1;
+        sel[2] = 1; // North
+        sel[3] = 1;
+
+        let (ca, cb) = detect_selection_clusters(&mesh, &sel, None)
+            .expect("Should detect North and South clusters");
+
+        let mut config = BridgeConfig::default();
+        config.segments = 2;
+        let patch = generate_bridge_patch(&mesh, &ca, &cb, config)
+            .expect("Bridge across hole should succeed");
+
+        println!("ca chain: {:?}", ca.boundary_chain);
+        println!("cb chain: {:?}", cb.boundary_chain);
+        let mut bridged_mesh = mesh.clone();
+        apply_bridge_patch(&mut bridged_mesh, &patch);
+
+        let after_holes = detect_holes(&bridged_mesh);
+        println!("after_holes (len {}):", after_holes.len());
+        for h in &after_holes {
+            println!("  hole id {}: verts {:?}", h.id, h.vertices);
+        }
+        let b_edges = crate::geom::boundary::find_boundary_edges(&bridged_mesh);
+        println!("boundary edges ({})", b_edges.len());
+        for e in &b_edges {
+            println!("  {:?} dir {:?}", e.key, e.directed);
+        }
+        // The bridge divided the inner hole into two separate holes!
+        // So total loops = 1 outer loop + 2 inner holes = 3 loops!
+        assert_eq!(
+            after_holes.len(),
+            initial_holes.len() + 1,
+            "Bridge must split the hole into two smaller holes"
+        );
+
+        let health = analyze_mesh(&bridged_mesh);
+        assert_eq!(health.non_manifold_edges, 0, "No non-manifold edges after hole bridge");
+    }
+
+    #[test]
+    fn test_bridge_app_workflow_and_undo() {
+        use crate::app::App;
+        let mut app = App::new();
+        // Load a simple two-strip mesh
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        positions.push([0.0, 0.0, 0.0]); // 0
+        positions.push([2.0, 0.0, 0.0]); // 1
+        positions.push([2.0, 4.0, 0.0]); // 2
+        positions.push([0.0, 4.0, 0.0]); // 3
+        indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+
+        positions.push([6.0, 0.0, 0.0]); // 4
+        positions.push([8.0, 0.0, 0.0]); // 5
+        positions.push([8.0, 4.0, 0.0]); // 6
+        positions.push([6.0, 4.0, 0.0]); // 7
+        indices.extend_from_slice(&[4, 5, 6, 4, 6, 7]);
+
+        let m = Mesh::from_indexed(positions, indices);
+        let orig_tris = m.triangle_count();
+        app.set_mesh_modified(m, "Init test".to_string());
+        app.original = app.current.clone();
+
+        // Select both strips
+        let mut sel = vec![0u8; orig_tris];
+        sel[0] = 1;
+        sel[1] = 1;
+        sel[2] = 1;
+        sel[3] = 1;
+        app.sel = std::sync::Arc::new(sel);
+        app.recount_sel();
+
+        // Verify update_bridge_preview produced a preview patch
+        assert!(app.bridge_preview_patch.is_some(), "Preview patch should be generated");
+        assert!(app.bridge_status.is_some(), "Bridge status should be set");
+
+        // Apply bridge
+        app.apply_bridge();
+
+        assert!(
+            app.current.as_ref().unwrap().triangle_count() > orig_tris,
+            "Triangle count must increase after bridge"
+        );
+        assert_eq!(app.undo.len(), 1, "Undo stack must have 1 snapshot");
+
+        // Test Undo
+        app.undo();
+        assert_eq!(
+            app.current.as_ref().unwrap().triangle_count(),
+            orig_tris,
+            "Undo must restore original triangle count"
+        );
+    }
 }
 
 

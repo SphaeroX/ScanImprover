@@ -201,6 +201,10 @@ pub struct App {
     pub(crate) repair_refine_to_references: bool,
     pub(crate) repair_solve_status: Option<String>,
     pub(crate) repair_circle_mode: crate::geom::hole_solver::CircleGuideMode,
+    pub(crate) bridge_config: crate::geom::bridge::BridgeConfig,
+    pub(crate) bridge_preview_active: bool,
+    pub(crate) bridge_preview_patch: Option<crate::geom::hole_fill::MeshPatch>,
+    pub(crate) bridge_status: Option<String>,
 }
 
 impl App {
@@ -299,6 +303,10 @@ impl App {
             repair_refine_to_references: false,
             repair_solve_status: None,
             repair_circle_mode: crate::geom::hole_solver::CircleGuideMode::DiskAndRim,
+            bridge_config: crate::geom::bridge::BridgeConfig::default(),
+            bridge_preview_active: true,
+            bridge_preview_patch: None,
+            bridge_status: None,
         };
         if let Some(arg) = std::env::args().nth(1) {
             let path = PathBuf::from(arg);
@@ -391,6 +399,8 @@ impl App {
             self.repair_holes.clear();
             self.repair_selected_hole = None;
             self.repair_preview_patch = None;
+            self.bridge_preview_patch = None;
+            self.bridge_status = None;
             self.repair_health = None;
             self.mesh_dirty = true;
             self.aux_dirty = true;
@@ -449,6 +459,8 @@ impl App {
             self.repair_holes.clear();
             self.repair_selected_hole = None;
             self.repair_preview_patch = None;
+            self.bridge_preview_patch = None;
+            self.bridge_status = None;
             self.repair_health = None;
             self.mesh_dirty = true;
             self.aux_dirty = true;
@@ -460,6 +472,7 @@ impl App {
 
     pub(crate) fn recount_sel(&mut self) {
         self.sel_count = self.sel.iter().filter(|&&v| v > 0).count();
+        self.update_bridge_preview();
     }
 
     fn sync_bbox(&mut self) {
@@ -1493,6 +1506,8 @@ impl App {
             }
             self.sel_count = 0;
             self.aux_dirty = true;
+            self.bridge_preview_patch = None;
+            self.bridge_status = None;
         }
     }
 
@@ -2198,6 +2213,78 @@ impl App {
                 );
             } else {
                 self.status = "Failed to fill holes.".to_string();
+            }
+        }
+    }
+
+    pub(crate) fn set_bridge_config(&mut self, config: crate::geom::bridge::BridgeConfig) {
+        self.bridge_config = config;
+        self.update_bridge_preview();
+    }
+
+    pub(crate) fn set_bridge_preview_active(&mut self, active: bool) {
+        self.bridge_preview_active = active;
+        self.update_bridge_preview();
+    }
+
+    pub(crate) fn update_bridge_preview(&mut self) {
+        if !self.bridge_preview_active || self.sel_count == 0 {
+            self.bridge_preview_patch = None;
+            self.bridge_status = None;
+            return;
+        }
+
+        if let Some(curr) = self.current.clone() {
+            let topo = self.topology.clone();
+            match crate::geom::bridge::detect_selection_clusters(&curr, &self.sel, topo.as_deref()) {
+                Ok((cluster_a, cluster_b)) => {
+                    match crate::geom::bridge::generate_bridge_patch(&curr, &cluster_a, &cluster_b, self.bridge_config) {
+                        Ok(patch) => {
+                            self.bridge_status = Some(format!(
+                                "Bridge ready: A ({} v) ↔ B ({} v), {} segments",
+                                cluster_a.boundary_chain.len(),
+                                cluster_b.boundary_chain.len(),
+                                self.bridge_config.segments
+                            ));
+                            self.bridge_preview_patch = Some(patch);
+                        }
+                        Err(e) => {
+                            self.bridge_status = Some(format!("Bridge error: {e}"));
+                            self.bridge_preview_patch = None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.bridge_status = Some(e);
+                    self.bridge_preview_patch = None;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn apply_bridge(&mut self) {
+        if let Some(curr) = self.current.clone() {
+            let topo = self.topology.clone();
+            match crate::geom::bridge::detect_selection_clusters(&curr, &self.sel, topo.as_deref()) {
+                Ok((cluster_a, cluster_b)) => {
+                    match crate::geom::bridge::generate_bridge_patch(&curr, &cluster_a, &cluster_b, self.bridge_config) {
+                        Ok(patch) => {
+                            self.push_snapshot();
+                            let mut next_mesh = (*curr).clone();
+                            crate::geom::bridge::apply_bridge_patch(&mut next_mesh, &patch);
+                            self.bridge_preview_patch = None;
+                            self.bridge_status = None;
+                            let segs = self.bridge_config.segments;
+                            let added_tris = patch.new_indices.len() / 3;
+                            self.set_mesh_modified(
+                                next_mesh,
+                                format!("Bridge applied ({} segments, {} triangles added).", segs, added_tris),
+                            );
+                        }
+                        Err(e) => self.status = format!("Bridge failed: {e}"),
+                    }
+                }
+                Err(e) => self.status = format!("Cannot bridge: {e}"),
             }
         }
     }
@@ -3040,6 +3127,25 @@ impl App {
                 if let Some(patch) = &self.repair_preview_patch {
                     let fill_col = [0.15, 0.85, 0.95, 0.35];
                     let wire_col = [0.2, 0.95, 1.0, 0.9];
+                    for chunk in patch.preview_indices.chunks_exact(3) {
+                        let p0 = Vec3::from(patch.preview_positions[chunk[0] as usize]);
+                        let p1 = Vec3::from(patch.preview_positions[chunk[1] as usize]);
+                        let p2 = Vec3::from(patch.preview_positions[chunk[2] as usize]);
+
+                        fills.push([p0.x, p0.y, p0.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+                        fills.push([p1.x, p1.y, p1.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+                        fills.push([p2.x, p2.y, p2.z, fill_col[0], fill_col[1], fill_col[2], fill_col[3]]);
+
+                        push_line(&mut overlay_lines, p0, p1, wire_col);
+                        push_line(&mut overlay_lines, p1, p2, wire_col);
+                        push_line(&mut overlay_lines, p2, p0, wire_col);
+                    }
+                }
+            }
+            if self.bridge_preview_active {
+                if let Some(patch) = &self.bridge_preview_patch {
+                    let fill_col = [0.15, 0.90, 0.65, 0.40];
+                    let wire_col = [0.20, 1.0, 0.75, 0.95];
                     for chunk in patch.preview_indices.chunks_exact(3) {
                         let p0 = Vec3::from(patch.preview_positions[chunk[0] as usize]);
                         let p1 = Vec3::from(patch.preview_positions[chunk[1] as usize]);

@@ -11,4 +11,4 @@ pub mod repair;
 pub mod segment;
 pub mod symmetry;
 pub mod topology;
-
+pub mod bridge;

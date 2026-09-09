@@ -2,6 +2,7 @@ pub mod accordion;
 pub mod alignment;
 pub mod object_browser;
 pub mod repair;
+pub mod bridge;
 pub mod sections;
 pub mod selection_hud;
 

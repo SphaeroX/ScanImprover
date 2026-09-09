@@ -338,6 +338,9 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
+    ui.add_space(4.0);
+    crate::ui::bridge::render_bridge_section(app, ui);
+
     let plane_copy = app.plane;
     if plane_copy.is_some() {
         let p = plane_copy.unwrap();
