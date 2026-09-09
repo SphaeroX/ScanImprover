@@ -2553,12 +2553,18 @@ mod tests {
         app.sel = std::sync::Arc::new(sel);
         app.recount_sel();
 
-        // Verify update_bridge_preview produced a preview patch
-        assert!(app.bridge_preview_patch.is_some(), "Preview patch should be generated");
+        // Verify bridge preview is NOT automatically generated until activated
+        assert!(app.bridge_preview_patch.is_none(), "Preview patch should not be generated automatically");
+        assert!(!app.bridge_preview_active, "Bridge preview should be inactive by default");
+
+        // Explicitly activate bridge preview
+        app.set_bridge_preview_active(true);
+        assert!(app.bridge_preview_patch.is_some(), "Preview patch should be generated when active");
         assert!(app.bridge_status.is_some(), "Bridge status should be set");
 
         // Apply bridge
         app.apply_bridge();
+        assert!(!app.bridge_preview_active, "Bridge preview should deactivate after apply");
 
         assert!(
             app.current.as_ref().unwrap().triangle_count() > orig_tris,

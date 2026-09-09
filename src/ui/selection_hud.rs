@@ -59,25 +59,47 @@ pub fn render_selection_hud(app: &mut App, ui: &mut egui::Ui, viewport_rect: egu
                         }
 
                         if has_two_clusters {
+                            let is_active = app.bridge_preview_active;
+                            let (fill_col, stroke_col, text_col) = if is_active {
+                                (
+                                    egui::Color32::from_rgba_unmultiplied(45, 175, 115, 100),
+                                    egui::Color32::from_rgba_unmultiplied(80, 230, 160, 180),
+                                    egui::Color32::from_rgb(220, 255, 235),
+                                )
+                            } else {
+                                (
+                                    egui::Color32::from_rgba_unmultiplied(35, 140, 95, 45),
+                                    egui::Color32::from_rgba_unmultiplied(50, 180, 120, 90),
+                                    egui::Color32::from_rgb(140, 240, 190),
+                                )
+                            };
+
                             let bridge_btn = egui::Button::new(
                                 egui::RichText::new("🌉 Bridge")
                                     .size(11.5)
-                                    .color(egui::Color32::from_rgb(140, 240, 190)),
+                                    .color(text_col),
                             )
-                            .fill(egui::Color32::from_rgba_unmultiplied(35, 140, 95, 45))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgba_unmultiplied(50, 180, 120, 90),
-                            ))
+                            .fill(fill_col)
+                            .stroke(egui::Stroke::new(1.0, stroke_col))
                             .corner_radius(10.0);
+
+                            let tooltip = if is_active {
+                                "Hide bridge preview & deactivate bridge mode"
+                            } else {
+                                "Open Contour Bridge tool & view bridge preview"
+                            };
 
                             if ui
                                 .add(bridge_btn)
-                                .on_hover_text("Open Contour Bridge tool & view bridge preview")
+                                .on_hover_text(tooltip)
                                 .clicked()
                             {
-                                app.active_section = Some(crate::ui::ToolSection::Selection);
-                                app.set_bridge_preview_active(true);
+                                if is_active {
+                                    app.set_bridge_preview_active(false);
+                                } else {
+                                    app.active_section = Some(crate::ui::ToolSection::Selection);
+                                    app.set_bridge_preview_active(true);
+                                }
                             }
 
                             ui.add_space(4.0);

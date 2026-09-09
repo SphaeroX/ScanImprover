@@ -185,30 +185,6 @@ pub fn export_all_references_dialog(
     ))
 }
 
-/// Prompts the user to save a fitted feature (surface or solid body).
-pub fn export_fit_feature_dialog(
-    feature: &crate::geom::fit_to_object::FittedObjectFeature,
-) -> Result<String, String> {
-    let sanitized_name = sanitize_filename(&feature.name);
-    let default_filename = format!("{sanitized_name}.stl");
-
-    let file_path = rfd::FileDialog::new()
-        .add_filter("STL Mesh (*.stl)", &["stl"])
-        .add_filter("Wavefront OBJ (*.obj)", &["obj"])
-        .add_filter("Stanford PLY (*.ply)", &["ply"])
-        .set_file_name(&default_filename)
-        .save_file();
-
-    let Some(path) = file_path else {
-        return Ok("Export cancelled.".to_string());
-    };
-
-    crate::io::save_any(&path, &feature.mesh)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-
-    Ok(format!("Exported {} to {}", feature.name, path.display()))
-}
-
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| {

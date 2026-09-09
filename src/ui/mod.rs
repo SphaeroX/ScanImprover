@@ -3,7 +3,6 @@ pub mod alignment;
 pub mod object_browser;
 pub mod repair;
 pub mod bridge;
-pub mod experimental;
 pub mod sections;
 pub mod selection_hud;
 
@@ -20,7 +19,6 @@ pub enum ToolSection {
     Coordinates,
     Repair,
     Decimation,
-    Experimental,
 }
 
 /// Renders the complete left panel with the accordion sections.
@@ -173,27 +171,6 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
         if dec_open {
             accordion_body(ui, |ui| {
                 sections::render_decimation(app, ui);
-            });
-        }
-        ui.add_space(3.0);
-
-        // Section 7: Experimental (Fit to Object)
-        let exp_badge_str = if !app.fit_features.is_empty() {
-            Some(format!("{} fit features", app.fit_features.len()))
-        } else {
-            Some("Fit to Object".to_string())
-        };
-        let exp_open = app.active_section == Some(ToolSection::Experimental);
-        if accordion_header(ui, "Experimental", exp_open, exp_badge_str.as_deref()) {
-            app.active_section = if exp_open {
-                None
-            } else {
-                Some(ToolSection::Experimental)
-            };
-        }
-        if exp_open {
-            accordion_body(ui, |ui| {
-                experimental::render_experimental(app, ui);
             });
         }
         ui.add_space(6.0);
