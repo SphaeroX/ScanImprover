@@ -1,4 +1,4 @@
-﻿# ScanImprover
+# ScanImprover
 
 > **Note:** This project is 100% **Vibe Coding** — created iteratively and experimentally with AI assistance, but it works exceptionally well for my daily workflow!
 
@@ -18,6 +18,23 @@ When working with 3D scan data for reverse engineering in CAD software, two majo
 **ScanImprover solves both problems fast:**
 * **Perfect Alignment:** Fit geometric primitives (planes, cylinders, spheres) to selected scan features, align normal vectors to primary axes, and snap origins cleanly.
 * **Smart Mesh Decimation:** Drastically reduce triangle count while preserving geometric silhouettes and surface details, ensuring smooth and responsive CAD performance.
+
+---
+
+## 📸 Feature Showcase
+
+| **Automatic Face Groups & Primitive Classification** | **Alignment & Coordinate System Snapping** |
+| :---: | :---: |
+| ![Detect Face Groups](screenshots/detect_face_groups.png) | ![Alignment](screenshots/alignment.png) |
+
+| **Interactive Plane Creation & Fitting** | **Freeform Surface Fitting** |
+| :---: | :---: |
+| ![Plane Creation](screenshots/plane_create.png) | ![Freeform Fit](screenshots/freeform_fit.png) |
+
+### Symmetry Plane Detection
+| Before Detection | After Detection & Mirroring |
+| :---: | :---: |
+| ![Symmetry Detection Before](screenshots/symetry_detection_before.png) | ![Symmetry Detection After](screenshots/symetry_detection_after.png) |
 
 ---
 
