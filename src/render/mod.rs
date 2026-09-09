@@ -89,27 +89,52 @@ fn type_color(code: f32) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
     let v = normalize(U.cam_pos.xyz - in.wp);
     var n = normalize(in.nrm);
+    if (!is_front) {
+        n = -n;
+    }
     n = select(-n, n, dot(n, v) >= 0.0);
     let l1 = normalize(U.light1.xyz);
     let l2 = normalize(U.light2.xyz);
     let diff = 0.15 + 0.60 * max(dot(n, l1), 0.0) + 0.35 * max(dot(n, l2), 0.0);
     let h1 = normalize(l1 + v);
-    let spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
+    var spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
+
     var col = vec3<f32>(0.72, 0.74, 0.78);
+    // Backface / inside coloring: distinct warm terracotta tone with subdued specular
+    if (!is_front) {
+        col = vec3<f32>(0.76, 0.40, 0.28);
+        spec = spec * 0.15;
+    }
+
     // Face group coloring: aux.z >= 0 = distinct hue id,
     // <= -3.0 = type code, -2.0 = group boundary seam, -1.0 = ungrouped.
     if (U.params.z > 0.5 && in.aux.z >= 0.0) {
-        col = group_color(in.aux.z);
+        let gcol = group_color(in.aux.z);
+        if (is_front) {
+            col = gcol;
+        } else {
+            col = mix(gcol * 0.65, vec3<f32>(0.76, 0.40, 0.28), 0.45);
+        }
     } else if (U.params.z > 0.5 && in.aux.z <= -3.0) {
-        col = type_color(-in.aux.z);
+        let tcol = type_color(-in.aux.z);
+        if (is_front) {
+            col = tcol;
+        } else {
+            col = mix(tcol * 0.65, vec3<f32>(0.76, 0.40, 0.28), 0.45);
+        }
     } else if (U.params.z > 0.5 && in.aux.z <= -2.5) {
         col = vec3<f32>(0.16, 0.17, 0.21);
     }
     if (U.params.x > 0.5 && in.aux.y >= 0.0) {
-        col = heat_color(clamp(in.aux.y * U.params.y, 0.0, 1.0));
+        let hcol = heat_color(clamp(in.aux.y * U.params.y, 0.0, 1.0));
+        if (is_front) {
+            col = hcol;
+        } else {
+            col = mix(hcol * 0.70, vec3<f32>(0.76, 0.40, 0.28), 0.35);
+        }
     }
     if (U.params.z > 0.5 && U.params.w >= 0.0 && abs(in.aux.w - U.params.w) < 0.5) {
         col = mix(col, vec3<f32>(1.0, 1.0, 1.0), 0.45);
@@ -941,4 +966,24 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
 
 pub fn make_callback(gpu: Arc<Mutex<GpuState>>, rect: egui::Rect) -> egui::PaintCallback {
     egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback { gpu })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mesh_wgsl_syntax_and_front_facing() {
+        assert!(MESH_WGSL.contains("@builtin(front_facing) is_front: bool"));
+        assert!(MESH_WGSL.contains("if (!is_front)"));
+        // Validate WGSL parsing with wgpu naga frontend
+        let res = wgpu::naga::front::wgsl::parse_str(MESH_WGSL);
+        assert!(res.is_ok(), "MESH_WGSL failed to parse: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_line_and_blit_wgsl_syntax() {
+        assert!(wgpu::naga::front::wgsl::parse_str(LINE_WGSL).is_ok());
+        assert!(wgpu::naga::front::wgsl::parse_str(BLIT_WGSL).is_ok());
+    }
 }
