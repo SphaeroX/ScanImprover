@@ -49,6 +49,29 @@ pub fn render_selection_hud(app: &mut App, ui: &mut egui::Ui, viewport_rect: egu
                         ui.separator();
                         ui.add_space(4.0);
 
+                        // Hide button
+                        let hide_btn = egui::Button::new(
+                            egui::RichText::new("👁 Hide")
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(180, 210, 255)),
+                        )
+                        .fill(egui::Color32::from_rgba_unmultiplied(60, 110, 200, 45))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_unmultiplied(100, 160, 255, 90),
+                        ))
+                        .corner_radius(10.0);
+
+                        if ui
+                            .add(hide_btn)
+                            .on_hover_text("Hide selected faces (H) to view and select geometry behind")
+                            .clicked()
+                        {
+                            app.hide_selection();
+                        }
+
+                        ui.add_space(4.0);
+
                         // Unselect button
                         let btn = egui::Button::new(
                             egui::RichText::new("Unselect")

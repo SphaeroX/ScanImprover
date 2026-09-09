@@ -4,6 +4,11 @@ use glam::Vec3;
 
 enum BrowserAction {
     ToggleMeshVisibility,
+    HideSelection,
+    ToggleHiddenRegionVisibility(u64),
+    RestoreHiddenRegion(u64),
+    RestoreAllHiddenRegions,
+    DeleteHiddenRegion(u64),
     TogglePlaneVisibility(u64),
     SelectPlane(u64),
     DeletePlane(u64),
@@ -43,6 +48,7 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
     let mut actions: Vec<BrowserAction> = Vec::new();
 
     let total_count = (if app.display().is_some() { 1 } else { 0 })
+        + app.hidden_regions.len()
         + app.planes.len()
         + app.circles.len()
         + app.freeforms.len()
@@ -99,6 +105,13 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                     }
                                     if ui.small_button("+ Fit Freeform").clicked() {
                                         actions.push(BrowserAction::FitFreeform);
+                                    }
+                                    if ui
+                                        .small_button("👁 Hide")
+                                        .on_hover_text("Hide selection (H)")
+                                        .clicked()
+                                    {
+                                        actions.push(BrowserAction::HideSelection);
                                     }
                                 });
                             });
@@ -177,6 +190,113 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                                 .size(11.0)
                                 .color(egui::Color32::from_gray(120)),
                         );
+                    }
+
+                    // --- SECTION: HIDDEN REGIONS ---
+                    let hidden_count = app.hidden_regions.len();
+                    if hidden_count > 0 {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("HIDDEN REGIONS ({hidden_count})"))
+                                    .size(10.5)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(130, 145, 170)),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .small_button(egui::RichText::new("Unhide All").size(10.0))
+                                    .on_hover_text("Restore all hidden regions back into mesh")
+                                    .clicked()
+                                {
+                                    actions.push(BrowserAction::RestoreAllHiddenRegions);
+                                }
+                            });
+                        });
+
+                        for hr in &app.hidden_regions {
+                            let tris = hr.mesh.triangle_count();
+                            let bg_color = if hr.visible {
+                                egui::Color32::from_rgba_unmultiplied(35, 45, 60, 60)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(25, 28, 36, 40)
+                            };
+
+                            egui::Frame::new()
+                                .fill(bg_color)
+                                .corner_radius(4.0)
+                                .inner_margin(egui::Margin::symmetric(6, 4))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let mut vis = hr.visible;
+                                        if ui
+                                            .checkbox(&mut vis, "")
+                                            .on_hover_text("Toggle visibility (Ein-/Ausblenden)")
+                                            .changed()
+                                        {
+                                            actions.push(BrowserAction::ToggleHiddenRegionVisibility(hr.id));
+                                        }
+
+                                        let icon_color = if hr.visible {
+                                            egui::Color32::from_rgb(100, 180, 255)
+                                        } else {
+                                            egui::Color32::from_rgb(100, 110, 125)
+                                        };
+                                        ui.label(egui::RichText::new("👁").size(12.0).color(icon_color));
+
+                                        let text_color = if hr.visible {
+                                            egui::Color32::from_rgb(220, 225, 235)
+                                        } else {
+                                            egui::Color32::from_rgb(150, 155, 170)
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(&hr.name)
+                                                .strong()
+                                                .size(11.5)
+                                                .color(text_color),
+                                        );
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .small_button(
+                                                        egui::RichText::new("✕")
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(220, 100, 100)),
+                                                    )
+                                                    .on_hover_text("Delete this hidden region")
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::DeleteHiddenRegion(hr.id));
+                                                }
+
+                                                if ui
+                                                    .small_button(
+                                                        egui::RichText::new("Restore")
+                                                            .size(10.0)
+                                                            .color(egui::Color32::from_rgb(150, 200, 255)),
+                                                    )
+                                                    .on_hover_text("Restore back into the mesh permanently")
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::RestoreHiddenRegion(hr.id));
+                                                }
+
+                                                ui.label(
+                                                    egui::RichText::new(format!("{tris} △"))
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(140, 150, 165)),
+                                                );
+                                            },
+                                        );
+                                    });
+                                });
+                            ui.add_space(2.0);
+                        }
                     }
 
                     ui.add_space(8.0);
@@ -949,6 +1069,21 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
             }
             BrowserAction::ToggleOrigin(feat) => {
                 app.toggle_origin_feature(feat);
+            }
+            BrowserAction::HideSelection => {
+                app.hide_selection();
+            }
+            BrowserAction::ToggleHiddenRegionVisibility(id) => {
+                app.toggle_hidden_region_visibility(id);
+            }
+            BrowserAction::RestoreHiddenRegion(id) => {
+                app.restore_hidden_region(id);
+            }
+            BrowserAction::RestoreAllHiddenRegions => {
+                app.restore_all_hidden_regions();
+            }
+            BrowserAction::DeleteHiddenRegion(id) => {
+                app.delete_hidden_region(id);
             }
         }
     }

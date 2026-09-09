@@ -2142,5 +2142,137 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn mesh_split_by_selection_and_combine() {
+        let m = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let total_tris = m.triangle_count();
+        assert_eq!(total_tris, 12);
+
+        // Select first 4 triangles
+        let mut sel = vec![0u8; total_tris];
+        sel[0] = 1;
+        sel[1] = 1;
+        sel[2] = 1;
+        sel[3] = 1;
+
+        let (kept, hidden) = m.split_by_selection(&sel);
+        assert_eq!(kept.triangle_count(), 8);
+        assert_eq!(hidden.triangle_count(), 4);
+        assert!(kept.vertex_count() > 0 && kept.vertex_count() <= m.vertex_count());
+        assert!(hidden.vertex_count() > 0 && hidden.vertex_count() <= m.vertex_count());
+
+        // Verify valid indices in both meshes
+        for &idx in &kept.indices {
+            assert!((idx as usize) < kept.vertex_count());
+        }
+        for &idx in &hidden.indices {
+            assert!((idx as usize) < hidden.vertex_count());
+        }
+
+        // Combine them back
+        let recombined = kept.combine(&hidden);
+        assert_eq!(recombined.triangle_count(), 12);
+        assert_eq!(recombined.vertex_count(), kept.vertex_count() + hidden.vertex_count());
+        for &idx in &recombined.indices {
+            assert!((idx as usize) < recombined.vertex_count());
+        }
+    }
+
+    #[test]
+    fn app_hide_selection_and_object_browser_lifecycle() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        let total_tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+        let mut sel = vec![0u8; total_tris];
+        sel[0] = 1;
+        sel[1] = 1;
+        app.sel = std::sync::Arc::new(sel);
+        app.sel_count = 2;
+
+        // Hide selection
+        app.hide_selection();
+        assert_eq!(app.hidden_regions.len(), 1);
+        let hr_id = app.hidden_regions[0].id;
+        assert_eq!(app.hidden_regions[0].name, "Hidden Region 1");
+        assert_eq!(app.hidden_regions[0].visible, false);
+        assert_eq!(app.hidden_regions[0].mesh.triangle_count(), 2);
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+        assert_eq!(app.sel_count, 0);
+
+        // Toggle visibility to true (einblenden)
+        app.toggle_hidden_region_visibility(hr_id);
+        assert_eq!(app.hidden_regions[0].visible, true);
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+
+        // Toggle visibility back to false (ausblenden)
+        app.toggle_hidden_region_visibility(hr_id);
+        assert_eq!(app.hidden_regions[0].visible, false);
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+
+        // Restore back to mesh permanently
+        app.restore_hidden_region(hr_id);
+        assert!(app.hidden_regions.is_empty());
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+
+        // Test Undo of restore
+        app.undo();
+        assert_eq!(app.hidden_regions.len(), 1);
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+
+        // Test Redo
+        app.redo();
+        assert!(app.hidden_regions.is_empty());
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+    }
+
+    #[test]
+    fn hidden_region_ray_picking_penetration() {
+        use crate::camera::Camera;
+        use crate::pick::ray_pick;
+
+        // Create a front box at z = 0 and a rear box at z = 10
+        let front = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let rear = box_mesh(0.0, 0.0, 10.0, 2.0, 2.0, 2.0);
+        let combined = front.combine(&rear);
+
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(combined);
+        let total_tris = m.triangle_count();
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+        app.sel = std::sync::Arc::new(vec![0u8; total_tris]);
+        app.sel_count = 0;
+
+        let mut cam = Camera::default();
+        cam.distance = 20.0;
+        cam.target = glam::Vec3::new(0.0, 0.0, 5.0);
+        cam.orient = glam::Quat::from_rotation_y(std::f32::consts::PI);
+
+        // With all visible, picking center hits the front box
+        let bvh1 = app.ensure_bvh().expect("BVH should build");
+        let hit1 = ray_pick(&bvh1, &cam, 400.0, 300.0, 800.0, 600.0).expect("Should hit front box");
+        assert!(hit1.pos.z < 2.0, "Hit should be on front box (z < 2.0), got z = {}", hit1.pos.z);
+
+        // Select the front box faces (first 12 triangles) and hide them
+        let mut sel = vec![0u8; total_tris];
+        for i in 0..12 {
+            sel[i] = 1;
+        }
+        app.sel = std::sync::Arc::new(sel);
+        app.sel_count = 12;
+        app.hide_selection();
+
+        assert_eq!(app.hidden_regions.len(), 1);
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+
+        // Now picking center penetrates right through the hidden front box and hits the rear box!
+        let bvh2 = app.ensure_bvh().expect("BVH should build for visible mesh");
+        let hit2 = ray_pick(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0).expect("Should hit rear box");
+        assert!(hit2.pos.z > 8.0, "Hit should penetrate and be on rear box (z > 8.0), got z = {}", hit2.pos.z);
+    }
 }
+
 

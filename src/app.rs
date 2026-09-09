@@ -78,6 +78,14 @@ pub(crate) fn group_matches_filter(kind: GroupKind, filter: GroupFilter) -> bool
 }
 
 #[derive(Clone)]
+pub struct HiddenRegion {
+    pub id: u64,
+    pub name: String,
+    pub visible: bool,
+    pub mesh: Arc<Mesh>,
+}
+
+#[derive(Clone)]
 pub(crate) struct Snapshot {
     pub(crate) current: Arc<Mesh>,
     pub(crate) original: Arc<Mesh>,
@@ -91,6 +99,8 @@ pub(crate) struct Snapshot {
     pub(crate) selected_plane_id: Option<u64>,
     pub(crate) selected_circle_id: Option<u64>,
     pub(crate) selected_freeform_id: Option<u64>,
+    pub(crate) hidden_regions: Vec<HiddenRegion>,
+    pub(crate) base_mesh: Option<Arc<Mesh>>,
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +157,8 @@ pub struct App {
     /// (job id, freeform id) of the freeform fit currently running.
     pub(crate) freeform_job: Option<(u64, u64)>,
     pub(crate) next_obj_id: u64,
+    pub(crate) hidden_regions: Vec<HiddenRegion>,
+    pub(crate) base_mesh: Option<Arc<Mesh>>,
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
     pub(crate) show_wireframe: bool,
@@ -242,6 +254,8 @@ impl App {
             selected_freeform_id: None,
             freeform_job: None,
             next_obj_id: 1,
+            hidden_regions: Vec::new(),
+            base_mesh: None,
             show_mesh: true,
             show_object_browser: true,
             show_wireframe: false,
@@ -318,6 +332,8 @@ impl App {
                 selected_plane_id: self.selected_plane_id,
                 selected_circle_id: self.selected_circle_id,
                 selected_freeform_id: self.selected_freeform_id,
+                hidden_regions: self.hidden_regions.clone(),
+                base_mesh: self.base_mesh.clone(),
             });
             if self.undo.len() > 25 {
                 self.undo.remove(0);
@@ -342,6 +358,8 @@ impl App {
                     selected_plane_id: self.selected_plane_id,
                     selected_circle_id: self.selected_circle_id,
                     selected_freeform_id: self.selected_freeform_id,
+                    hidden_regions: self.hidden_regions.clone(),
+                    base_mesh: self.base_mesh.clone(),
                 });
                 if self.redo.len() > 25 {
                     self.redo.remove(0);
@@ -360,6 +378,8 @@ impl App {
             self.selected_plane_id = s.selected_plane_id;
             self.selected_circle_id = s.selected_circle_id;
             self.selected_freeform_id = s.selected_freeform_id;
+            self.hidden_regions = s.hidden_regions;
+            self.base_mesh = s.base_mesh;
             self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
@@ -396,6 +416,8 @@ impl App {
                     selected_plane_id: self.selected_plane_id,
                     selected_circle_id: self.selected_circle_id,
                     selected_freeform_id: self.selected_freeform_id,
+                    hidden_regions: self.hidden_regions.clone(),
+                    base_mesh: self.base_mesh.clone(),
                 });
                 if self.undo.len() > 25 {
                     self.undo.remove(0);
@@ -414,6 +436,8 @@ impl App {
             self.selected_plane_id = s.selected_plane_id;
             self.selected_circle_id = s.selected_circle_id;
             self.selected_freeform_id = s.selected_freeform_id;
+            self.hidden_regions = s.hidden_regions;
+            self.base_mesh = s.base_mesh;
             self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
@@ -486,6 +510,8 @@ impl App {
                     self.repair_selected_hole = None;
                     self.repair_preview_patch = None;
                     self.repair_health = None;
+                    self.hidden_regions.clear();
+                    self.base_mesh = None;
                     self.undo.clear();
                     self.redo.clear();
                     self.mesh_dirty = true;
@@ -508,6 +534,7 @@ impl App {
         let mut new_current = None;
         let mut new_original = None;
         let mut new_preview = None;
+        let mut new_base = None;
         if let Some(m) = &self.current {
             let mut m2 = (**m).clone();
             m2.transform(rot, trans);
@@ -523,9 +550,20 @@ impl App {
             m2.transform(rot, trans);
             new_preview = Some(Arc::new(m2));
         }
+        if let Some(m) = &self.base_mesh {
+            let mut m2 = (**m).clone();
+            m2.transform(rot, trans);
+            new_base = Some(Arc::new(m2));
+        }
+        for hr in &mut self.hidden_regions {
+            let mut m2 = (*hr.mesh).clone();
+            m2.transform(rot, trans);
+            hr.mesh = Arc::new(m2);
+        }
         self.current = new_current;
         self.original = new_original;
         self.preview = new_preview;
+        self.base_mesh = new_base;
         if let Some(s) = &mut self.sym {
             s.plane.point = rot * s.plane.point + trans;
             s.plane.normal = (rot * s.plane.normal).normalize();
@@ -576,7 +614,7 @@ impl App {
         self.sync_bbox();
     }
 
-    fn ensure_bvh(&mut self) -> Option<Arc<Bvh>> {
+    pub(crate) fn ensure_bvh(&mut self) -> Option<Arc<Bvh>> {
         if let Some(b) = &self.bvh {
             return Some(b.clone());
         }
@@ -1458,6 +1496,166 @@ impl App {
         }
     }
 
+    pub(crate) fn sync_visible_mesh(&mut self) {
+        let base = match &self.base_mesh {
+            Some(b) => b.clone(),
+            None => match &self.current {
+                Some(c) => c.clone(),
+                None => return,
+            },
+        };
+
+        let mut combined = (*base).clone();
+        for hr in &self.hidden_regions {
+            if hr.visible {
+                combined = combined.combine(&hr.mesh);
+            }
+        }
+
+        let m = Arc::new(combined);
+        let tris = m.triangle_count();
+        self.current = Some(m);
+        self.sel = Arc::new(vec![0u8; tris]);
+        self.sel_count = 0;
+        self.bvh = None;
+        self.topology = None;
+        self.invalidate_face_groups();
+        self.hover_hit = None;
+        self.hover_tris.clear();
+        self.mesh_dirty = true;
+        self.aux_dirty = true;
+        self.wire_dirty = true;
+        self.sync_bbox();
+    }
+
+    pub(crate) fn hide_selection(&mut self) {
+        if self.sel_count == 0 {
+            return;
+        }
+        let Some(m) = self.current.clone() else { return; };
+        if self.sel.len() != m.triangle_count() {
+            return;
+        }
+
+        self.push_snapshot();
+
+        let (kept_mesh, hidden_mesh) = m.split_by_selection(&self.sel);
+        if kept_mesh.triangle_count() == 0 {
+            self.status = "Cannot hide all faces of the mesh.".to_string();
+            return;
+        }
+
+        let hidden_tris = hidden_mesh.triangle_count();
+        let id = self.next_obj_id;
+        self.next_obj_id += 1;
+        let name = format!("Hidden Region {}", self.hidden_regions.len() + 1);
+
+        self.hidden_regions.push(HiddenRegion {
+            id,
+            name: name.clone(),
+            visible: false,
+            mesh: Arc::new(hidden_mesh),
+        });
+
+        self.base_mesh = Some(Arc::new(kept_mesh));
+        self.sync_visible_mesh();
+
+        self.status = format!("Hidden {hidden_tris} faces into '{name}'.");
+    }
+
+    pub(crate) fn toggle_hidden_region_visibility(&mut self, id: u64) {
+        let idx = self.hidden_regions.iter().position(|r| r.id == id);
+        if let Some(i) = idx {
+            self.push_snapshot();
+            let hr = &mut self.hidden_regions[i];
+            hr.visible = !hr.visible;
+            let vis = hr.visible;
+            let name = hr.name.clone();
+            self.sync_visible_mesh();
+            self.status = if vis {
+                format!("Showing '{name}'.")
+            } else {
+                format!("Hiding '{name}'.")
+            };
+        }
+    }
+
+    pub(crate) fn restore_hidden_region(&mut self, id: u64) {
+        let idx = self.hidden_regions.iter().position(|r| r.id == id);
+        if let Some(i) = idx {
+            self.push_snapshot();
+            let hr = self.hidden_regions.remove(i);
+            let base = self.base_mesh.take().or_else(|| self.current.clone());
+            if let Some(b) = base {
+                let combined = b.combine(&hr.mesh);
+                self.base_mesh = Some(Arc::new(combined));
+            }
+            if self.hidden_regions.is_empty() {
+                self.current = self.base_mesh.clone();
+                self.base_mesh = None;
+            } else {
+                self.sync_visible_mesh();
+            }
+            let tris = self.current.as_ref().map(|m| m.triangle_count()).unwrap_or(0);
+            self.sel = Arc::new(vec![0u8; tris]);
+            self.sel_count = 0;
+            self.bvh = None;
+            self.topology = None;
+            self.invalidate_face_groups();
+            self.hover_hit = None;
+            self.hover_tris.clear();
+            self.mesh_dirty = true;
+            self.aux_dirty = true;
+            self.wire_dirty = true;
+            self.sync_bbox();
+            self.status = format!("Restored '{}' back into the mesh.", hr.name);
+        }
+    }
+
+    pub(crate) fn restore_all_hidden_regions(&mut self) {
+        if self.hidden_regions.is_empty() {
+            return;
+        }
+        self.push_snapshot();
+        let base_opt = self.base_mesh.take().or_else(|| self.current.clone());
+        let Some(base_mesh) = base_opt else { return; };
+        let mut base = (*base_mesh).clone();
+        for hr in self.hidden_regions.drain(..) {
+            base = base.combine(&hr.mesh);
+        }
+        self.base_mesh = None;
+        let m = Arc::new(base);
+        let tris = m.triangle_count();
+        self.current = Some(m);
+        self.sel = Arc::new(vec![0u8; tris]);
+        self.sel_count = 0;
+        self.bvh = None;
+        self.topology = None;
+        self.invalidate_face_groups();
+        self.hover_hit = None;
+        self.hover_tris.clear();
+        self.mesh_dirty = true;
+        self.aux_dirty = true;
+        self.wire_dirty = true;
+        self.sync_bbox();
+        self.status = "All hidden regions restored to mesh.".to_string();
+    }
+
+    pub(crate) fn delete_hidden_region(&mut self, id: u64) {
+        let idx = self.hidden_regions.iter().position(|r| r.id == id);
+        if let Some(i) = idx {
+            self.push_snapshot();
+            let hr = self.hidden_regions.remove(i);
+            if hr.visible {
+                self.sync_visible_mesh();
+            }
+            if self.hidden_regions.is_empty() {
+                self.base_mesh = None;
+            }
+            self.status = format!("Deleted '{}'.", hr.name);
+        }
+    }
+
     pub(crate) fn ensure_topology(&mut self) -> Option<Arc<crate::geom::topology::MeshTopology>> {
         if let Some(t) = &self.topology {
             return Some(t.clone());
@@ -2304,6 +2502,10 @@ impl App {
         if esc {
             self.mode = Mode::Orbit;
             self.sym_pick.clear();
+        }
+        let key_h = ui.ctx().input(|i| !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(egui::Key::H));
+        if key_h && self.sel_count > 0 {
+            self.hide_selection();
         }
 
         // Navigation: MMB drag = Pan

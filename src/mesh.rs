@@ -197,6 +197,123 @@ impl Mesh {
         }
         out
     }
+
+    /// Splits this mesh into two meshes:
+    /// - first: kept triangles (where `sel[t] == 0`)
+    /// - second: hidden / extracted triangles (where `sel[t] > 0`)
+    /// Only referenced vertices are kept in each mesh, with remapped indices and preserved normals.
+    pub fn split_by_selection(&self, sel: &[u8]) -> (Mesh, Mesh) {
+        let nt = self.triangle_count();
+        let nv = self.vertex_count();
+        if sel.len() != nt {
+            return (self.clone(), Mesh::default());
+        }
+
+        let mut kept_remap = vec![u32::MAX; nv];
+        let mut hidden_remap = vec![u32::MAX; nv];
+
+        let mut kept_pos = Vec::new();
+        let mut kept_nrm = Vec::new();
+        let mut kept_idx = Vec::new();
+
+        let mut hidden_pos = Vec::new();
+        let mut hidden_nrm = Vec::new();
+        let mut hidden_idx = Vec::new();
+
+        let has_normals = self.normals.len() == nv;
+
+        for t in 0..nt {
+            let is_hidden = sel[t] > 0;
+            for k in 0..3 {
+                let old_v = self.indices[3 * t + k] as usize;
+                if is_hidden {
+                    let new_v = if hidden_remap[old_v] != u32::MAX {
+                        hidden_remap[old_v]
+                    } else {
+                        let idx = hidden_pos.len() as u32;
+                        hidden_remap[old_v] = idx;
+                        hidden_pos.push(self.positions[old_v]);
+                        if has_normals {
+                            hidden_nrm.push(self.normals[old_v]);
+                        }
+                        idx
+                    };
+                    hidden_idx.push(new_v);
+                } else {
+                    let new_v = if kept_remap[old_v] != u32::MAX {
+                        kept_remap[old_v]
+                    } else {
+                        let idx = kept_pos.len() as u32;
+                        kept_remap[old_v] = idx;
+                        kept_pos.push(self.positions[old_v]);
+                        if has_normals {
+                            kept_nrm.push(self.normals[old_v]);
+                        }
+                        idx
+                    };
+                    kept_idx.push(new_v);
+                }
+            }
+        }
+
+        let mut kept_mesh = Mesh {
+            positions: kept_pos,
+            normals: kept_nrm,
+            indices: kept_idx,
+        };
+        if !has_normals && !kept_mesh.positions.is_empty() {
+            kept_mesh.recompute_normals();
+        }
+
+        let mut hidden_mesh = Mesh {
+            positions: hidden_pos,
+            normals: hidden_nrm,
+            indices: hidden_idx,
+        };
+        if !has_normals && !hidden_mesh.positions.is_empty() {
+            hidden_mesh.recompute_normals();
+        }
+
+        (kept_mesh, hidden_mesh)
+    }
+
+    /// Combines this mesh with another mesh into a single mesh.
+    pub fn combine(&self, other: &Mesh) -> Mesh {
+        if self.positions.is_empty() {
+            return other.clone();
+        }
+        if other.positions.is_empty() {
+            return self.clone();
+        }
+
+        let nv_self = self.positions.len();
+        let mut positions = self.positions.clone();
+        positions.extend_from_slice(&other.positions);
+
+        let mut normals = self.normals.clone();
+        if normals.len() == nv_self && other.normals.len() == other.positions.len() {
+            normals.extend_from_slice(&other.normals);
+        } else {
+            normals.clear();
+        }
+
+        let offset = nv_self as u32;
+        let mut indices = self.indices.clone();
+        indices.reserve(other.indices.len());
+        for &idx in &other.indices {
+            indices.push(idx + offset);
+        }
+
+        let mut m = Mesh {
+            positions,
+            normals,
+            indices,
+        };
+        if m.normals.is_empty() && !m.positions.is_empty() {
+            m.recompute_normals();
+        }
+        m
+    }
 }
 
 impl From<(Vec3, Vec3)> for Aabb {
