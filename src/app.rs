@@ -762,12 +762,21 @@ impl App {
                                     .iter_mut()
                                     .find(|f| f.id == freeform_id)
                                 {
+                                    let (heat, in_tol) = if let Some(bvh) = &self.bvh {
+                                        let (h, _, _) = crate::geom::freeform::compute_freeform_deviation(&d.surface, bvh);
+                                        let in_tol = crate::geom::freeform::calculate_in_tolerance_pct(&h, f.heat_max);
+                                        (Some(h), in_tol)
+                                    } else {
+                                        (None, 100.0)
+                                    };
                                     f.surface = Some(d.surface);
                                     f.boundary = boundary;
                                     f.rms = rms;
                                     f.max_dev = max_dev;
                                     f.fold_ratio = fold;
                                     f.point_count = count;
+                                    f.heat = heat;
+                                    f.in_tolerance_pct = in_tol;
                                     let ov = f.params.overshoot_mm;
                                     self.status = format!(
                                         "Freeform surface fitted: {tris} triangles, RMS {rms:.4} mm, overshoot {ov:.2} mm."
@@ -1063,6 +1072,11 @@ impl App {
             fold_ratio: 0.0,
             point_count: 0,
             refit_pending: false,
+            heat_on: false,
+            heat_max: 0.20,
+            heat_gradient: crate::geom::freeform::FreeformGradient::TrafficLight,
+            heat: None,
+            in_tolerance_pct: 100.0,
         });
         self.selected_freeform_id = Some(id);
         self.status = "Fitting freeform surface…".to_string();
@@ -1122,6 +1136,21 @@ impl App {
             match crate::export::export_freeform_dialog(f) {
                 Ok(msg) => self.status = msg,
                 Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn ensure_freeform_heat(&mut self, freeform_id: u64) {
+        if let Some(f) = self.freeforms.iter_mut().find(|f| f.id == freeform_id) {
+            if f.heat.is_none() {
+                if let Some(surf) = &f.surface {
+                    if let Some(bvh) = &self.bvh {
+                        let (heat, _, _) = crate::geom::freeform::compute_freeform_deviation(surf, bvh);
+                        let in_tol = crate::geom::freeform::calculate_in_tolerance_pct(&heat, f.heat_max);
+                        f.heat = Some(heat);
+                        f.in_tolerance_pct = in_tol;
+                    }
+                }
             }
         }
     }
@@ -2713,11 +2742,29 @@ impl App {
                 } else {
                     [col[0], col[1], col[2], 0.9]
                 };
+                let heatmap_active = f.heat_on
+                    && f.heat
+                        .as_ref()
+                        .map(|h| h.len() == surf.vertex_count())
+                        .unwrap_or(false);
+                let heat_alpha = if is_sel { 0.85 } else { 0.65 };
                 for chunk in surf.indices.chunks_exact(3) {
                     for k in 0..3 {
-                        let p = surf.positions[chunk[k] as usize];
+                        let idx = chunk[k] as usize;
+                        let p = surf.positions[idx];
+                        let c = if heatmap_active {
+                            let dist = f.heat.as_ref().unwrap()[idx];
+                            crate::geom::freeform::freeform_vertex_color(
+                                dist,
+                                f.heat_max,
+                                f.heat_gradient,
+                                heat_alpha,
+                            )
+                        } else {
+                            fill_col
+                        };
                         fills.push([
-                            p[0], p[1], p[2], fill_col[0], fill_col[1], fill_col[2], fill_col[3],
+                            p[0], p[1], p[2], c[0], c[1], c[2], c[3],
                         ]);
                     }
                 }

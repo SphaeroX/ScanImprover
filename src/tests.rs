@@ -1905,10 +1905,12 @@ mod tests {
         assert!(content.contains("FACE_OUTER_BOUND"));
         assert!(content.contains("OPEN_SHELL"));
         assert!(content.contains("END-ISO-10303-21;"));
-        // One cartesian point per control point, no duplicates needed.
+        assert!(content.contains("APPLICATION_PROTOCOL_DEFINITION"));
+        assert!(content.contains("AXIS2_PLACEMENT_3D"));
+        // One cartesian point per control point, plus global placement origin.
         let cp_count = (grid.nx + 1) * (grid.ny + 1);
         let point_count = content.matches("CARTESIAN_POINT").count();
-        assert_eq!(point_count, cp_count, "one point per control point expected");
+        assert_eq!(point_count, cp_count + 1, "one point per control point plus origin expected");
         // Clamped bicubic knot summary: multiplicities start and end with 4.
         let surface_line = content
             .lines()
@@ -2010,6 +2012,74 @@ mod tests {
             fit.surface.triangle_count()
         );
         assert!(dt.as_millis() < 2000, "fit took {dt:?}");
+    }
+
+    #[test]
+    fn freeform_deviation_computation_and_in_tolerance() {
+        use crate::geom::bvh::Bvh;
+        use crate::geom::freeform::{calculate_in_tolerance_pct, compute_freeform_deviation};
+        use crate::mesh::Mesh;
+
+        // Create a flat 2-triangle plane mesh at z = 0.
+        let plane_mesh = Mesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 10.0, 0.0],
+                [0.0, 10.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        let bvh = Bvh::new(&plane_mesh.positions, &plane_mesh.indices);
+
+        // Create a test surface mesh elevated by z = 0.1 at some vertices and z = 0.5 at others.
+        let test_surface = Mesh {
+            positions: vec![
+                [1.0, 1.0, 0.1],
+                [2.0, 2.0, 0.1],
+                [3.0, 3.0, 0.5],
+                [4.0, 4.0, 0.5],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+
+        let (heat, mean_dev, max_dev) = compute_freeform_deviation(&test_surface, &bvh);
+        assert_eq!(heat.len(), 4);
+        assert!((heat[0] - 0.1).abs() < 1e-4);
+        assert!((heat[1] - 0.1).abs() < 1e-4);
+        assert!((heat[2] - 0.5).abs() < 1e-4);
+        assert!((heat[3] - 0.5).abs() < 1e-4);
+        assert!((max_dev - 0.5).abs() < 1e-4);
+        assert!((mean_dev - 0.3).abs() < 1e-4);
+
+        // Tolerance check: with tol = 0.2, exactly 2 of 4 (50%) are within tolerance.
+        let tol_pct = calculate_in_tolerance_pct(&heat, 0.2);
+        assert!((tol_pct - 50.0).abs() < 1e-4);
+
+        // With tol = 0.6, 100% are within tolerance.
+        let tol_all = calculate_in_tolerance_pct(&heat, 0.6);
+        assert!((tol_all - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn freeform_vertex_color_gradient_traffic_light_and_spectrum() {
+        use crate::geom::freeform::{FreeformGradient, freeform_vertex_color};
+
+        // TrafficLight: 0.0 mm -> Green, 0.5 * max -> Yellow, 1.0 * max -> Red.
+        let col_zero = freeform_vertex_color(0.0, 0.2, FreeformGradient::TrafficLight, 1.0);
+        assert!(col_zero[1] > 0.8 && col_zero[0] < 0.2, "Zero dist must be green: {:?}", col_zero);
+
+        let col_max = freeform_vertex_color(0.2, 0.2, FreeformGradient::TrafficLight, 1.0);
+        assert!(col_max[0] > 0.9 && col_max[1] < 0.2, "Max dist must be red: {:?}", col_max);
+
+        // Spectrum: 0.0 mm -> Blue, 1.0 * max -> Red.
+        let col_spec_zero = freeform_vertex_color(0.0, 0.2, FreeformGradient::Spectrum, 1.0);
+        assert!(col_spec_zero[2] > 0.8 && col_spec_zero[0] < 0.2, "Zero dist in spectrum must be blue: {:?}", col_spec_zero);
+
+        let col_spec_max = freeform_vertex_color(0.25, 0.2, FreeformGradient::Spectrum, 1.0);
+        assert!(col_spec_max[0] > 0.9 && col_spec_max[2] < 0.1, "Clamped max dist in spectrum must be red: {:?}", col_spec_max);
     }
 }
 

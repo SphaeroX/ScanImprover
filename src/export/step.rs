@@ -509,6 +509,9 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     let ctx_id = id;
     writeln!(out, "#{id} = APPLICATION_CONTEXT('core data for automotive mechanical design processes');").unwrap();
     id += 1;
+    let _apd_id = id;
+    writeln!(out, "#{id} = APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{ctx_id});").unwrap();
+    id += 1;
     let pctx_id = id;
     writeln!(out, "#{id} = PRODUCT_CONTEXT('',#{ctx_id},'mechanical');").unwrap();
     id += 1;
@@ -542,6 +545,27 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     .unwrap();
     id += 1;
     writeln!(out, "#{id} = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-05),#{len_unit_id},'distance_accuracy_value','confusion accuracy');").unwrap();
+    id += 1;
+
+    // Origin point and axes for global placement context
+    let origin_id = id;
+    writeln!(out, "#{id} = CARTESIAN_POINT('',(0.,0.,0.));").unwrap();
+    id += 1;
+
+    let dir_z_id = id;
+    writeln!(out, "#{id} = DIRECTION('',(0.,0.,1.));").unwrap();
+    id += 1;
+
+    let dir_x_id = id;
+    writeln!(out, "#{id} = DIRECTION('',(1.,0.,0.));").unwrap();
+    id += 1;
+
+    let world_axis_id = id;
+    writeln!(
+        out,
+        "#{id} = AXIS2_PLACEMENT_3D('',#{origin_id},#{dir_z_id},#{dir_x_id});"
+    )
+    .unwrap();
     id += 1;
 
     // CARTESIAN_POINTs for the control net: cp_id[j][i].
@@ -699,7 +723,7 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     let rep_id = id;
     writeln!(
         out,
-        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Freeform Surface',((#{sbsm_id})),#{unctx_id});"
+        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Freeform Surface',((#{sbsm_id},#{world_axis_id})),#{unctx_id});"
     )
     .unwrap();
     id += 1;

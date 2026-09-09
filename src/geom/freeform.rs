@@ -28,6 +28,35 @@ pub struct FittedFreeform {
     pub point_count: usize,
     /// Set when parameters changed while a fit job was already running.
     pub refit_pending: bool,
+    /// Whether the deviation heatmap is rendered on this surface.
+    pub heat_on: bool,
+    /// Max deviation threshold in mm (where the heatmap turns full red).
+    pub heat_max: f32,
+    /// Color gradient style used for the heatmap.
+    pub heat_gradient: FreeformGradient,
+    /// Per-vertex deviation distances (in mm) from the fitted surface to the scan mesh.
+    pub heat: Option<Vec<f32>>,
+    /// Cached percentage of vertices within the heat_max tolerance.
+    pub in_tolerance_pct: f32,
+}
+
+/// Color gradient style used for the freeform deviation heatmap.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FreeformGradient {
+    /// Green (0.0 mm / close to scan) -> Yellow -> Orange -> Red (>= max deviation). CAD inspection style.
+    TrafficLight,
+    /// Blue (0.0 mm) -> Cyan -> Green -> Yellow -> Red (>= max deviation). Spectrum style.
+    Spectrum,
+}
+
+impl FreeformGradient {
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            FreeformGradient::TrafficLight => "Traffic Light (Green → Red)",
+            FreeformGradient::Spectrum => "Spectrum (Blue → Red)",
+        }
+    }
 }
 
 /// How the surface continues into the overshoot region beyond the selection.
@@ -826,6 +855,108 @@ pub fn boundary_segments(mesh: &Mesh) -> Vec<([f32; 3], [f32; 3])> {
         }
     }
     out
+}
+
+/// Computes per-vertex distance (in mm) from the fitted freeform surface to the scan mesh BVH.
+/// Returns (heat_distances, mean_deviation, max_deviation).
+pub fn compute_freeform_deviation(surface: &Mesh, bvh: &crate::geom::bvh::Bvh) -> (Vec<f32>, f32, f32) {
+    if surface.positions.is_empty() {
+        return (Vec::new(), 0.0, 0.0);
+    }
+    let heat: Vec<f32> = surface
+        .positions
+        .par_iter()
+        .map(|&p| bvh.closest_distance(Vec3::from(p)))
+        .collect();
+
+    let mut max_dev = 0.0f32;
+    let mut sum_dev = 0.0f64;
+    for &d in &heat {
+        if d > max_dev {
+            max_dev = d;
+        }
+        sum_dev += d as f64;
+    }
+    let mean_dev = (sum_dev / heat.len() as f64) as f32;
+    (heat, mean_dev, max_dev)
+}
+
+/// Calculates the percentage of points in `heat` that are <= `tolerance`.
+pub fn calculate_in_tolerance_pct(heat: &[f32], tolerance: f32) -> f32 {
+    if heat.is_empty() || tolerance <= 0.0 {
+        return 0.0;
+    }
+    let within = heat.iter().filter(|&&d| d <= tolerance).count();
+    (within as f32 / heat.len() as f32) * 100.0
+}
+
+/// Maps a distance measurement (mm) to an RGBA color based on the selected gradient and max deviation threshold.
+pub fn freeform_vertex_color(
+    dist: f32,
+    heat_max: f32,
+    gradient: FreeformGradient,
+    alpha: f32,
+) -> [f32; 4] {
+    let t = if heat_max > 1e-7 {
+        (dist / heat_max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let rgb = match gradient {
+        FreeformGradient::TrafficLight => {
+            // Green (0.0) -> Yellow (0.5) -> Red (1.0)
+            if t < 0.5 {
+                let f = t / 0.5;
+                [
+                    0.1 + f * 0.9,
+                    0.9 - f * 0.05,
+                    0.2 - f * 0.2,
+                ]
+            } else {
+                let f = (t - 0.5) / 0.5;
+                [
+                    1.0,
+                    0.85 - f * 0.80,
+                    f * 0.05,
+                ]
+            }
+        }
+        FreeformGradient::Spectrum => {
+            // Blue (0.0) -> Cyan (0.25) -> Green (0.50) -> Yellow (0.75) -> Red (1.0)
+            if t < 0.25 {
+                let f = t / 0.25;
+                [
+                    0.0,
+                    0.2 + f * 0.7,
+                    1.0 - f * 0.1,
+                ]
+            } else if t < 0.50 {
+                let f = (t - 0.25) / 0.25;
+                [
+                    f * 0.1,
+                    0.9,
+                    0.9 - f * 0.7,
+                ]
+            } else if t < 0.75 {
+                let f = (t - 0.50) / 0.25;
+                [
+                    0.1 + f * 0.9,
+                    0.9 - f * 0.05,
+                    0.2 - f * 0.2,
+                ]
+            } else {
+                let f = (t - 0.75) / 0.25;
+                [
+                    1.0,
+                    0.85 - f * 0.80,
+                    0.05 * (1.0 - f),
+                ]
+            }
+        }
+    };
+
+    [rgb[0], rgb[1], rgb[2], alpha]
 }
 
 // ---------------------------------------------------------------------------

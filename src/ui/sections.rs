@@ -505,10 +505,136 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
             || app.freeforms[idx].refit_pending;
         let mut new_params = None;
         let mut do_export = false;
+        let mut need_heat = false;
         ui.add_space(4.0);
         group_box(ui, Some(&title), |ui| {
             let f = &mut app.freeforms[idx];
             ui.checkbox(&mut f.visible, "Show surface");
+            ui.checkbox(&mut f.heat_on, "Deviation heatmap");
+            if f.heat_on {
+                if f.heat.is_none() {
+                    need_heat = true;
+                }
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label("Gradient:");
+                    ui.selectable_value(
+                        &mut f.heat_gradient,
+                        crate::geom::freeform::FreeformGradient::TrafficLight,
+                        "Traffic Light",
+                    );
+                    ui.selectable_value(
+                        &mut f.heat_gradient,
+                        crate::geom::freeform::FreeformGradient::Spectrum,
+                        "Spectrum",
+                    );
+                });
+
+                let old_max = f.heat_max;
+                let slider_resp = ui.add(
+                    egui::Slider::new(&mut f.heat_max, 0.005..=1.0)
+                        .text("Max dev (mm)")
+                        .logarithmic(true)
+                        .max_decimals(4),
+                );
+                if slider_resp.changed() || f.heat_max != old_max {
+                    if let Some(heat) = &f.heat {
+                        f.in_tolerance_pct =
+                            crate::geom::freeform::calculate_in_tolerance_pct(heat, f.heat_max);
+                    }
+                }
+
+                // Presets for realistic tolerances
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Presets:").small());
+                    for &val in &[0.05f32, 0.10, 0.20] {
+                        if ui.small_button(format!("{val:.2}")).clicked() {
+                            f.heat_max = val;
+                            if let Some(heat) = &f.heat {
+                                f.in_tolerance_pct =
+                                    crate::geom::freeform::calculate_in_tolerance_pct(heat, f.heat_max);
+                            }
+                        }
+                    }
+                    if f.max_dev > 0.0
+                        && ui
+                            .small_button("Auto")
+                            .on_hover_text("Set max deviation to fitted peak")
+                            .clicked()
+                    {
+                        f.heat_max = f.max_dev.max(0.01);
+                        if let Some(heat) = &f.heat {
+                            f.in_tolerance_pct =
+                                crate::geom::freeform::calculate_in_tolerance_pct(heat, f.heat_max);
+                        }
+                    }
+                });
+
+                // Gradient bar legend
+                let (rect, _resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().min(260.0), 12.0),
+                    egui::Sense::hover(),
+                );
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    let n_steps = 32;
+                    let step_w = rect.width() / n_steps as f32;
+                    for s in 0..n_steps {
+                        let t = s as f32 / (n_steps - 1) as f32;
+                        let col = crate::geom::freeform::freeform_vertex_color(
+                            t * f.heat_max,
+                            f.heat_max,
+                            f.heat_gradient,
+                            1.0,
+                        );
+                        let sub_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.min.x + s as f32 * step_w, rect.min.y),
+                            egui::vec2(step_w + 0.5, rect.height()),
+                        );
+                        painter.rect_filled(
+                            sub_rect,
+                            0.0,
+                            egui::Color32::from_rgb(
+                                (col[0] * 255.0) as u8,
+                                (col[1] * 255.0) as u8,
+                                (col[2] * 255.0) as u8,
+                            ),
+                        );
+                    }
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("0.0 mm").small().weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:.3} mm (Red)", f.heat_max))
+                                .small()
+                                .weak(),
+                        );
+                    });
+                });
+
+                if f.heat.is_some() {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{:.1}% within tolerance (≤ {:.3} mm)",
+                            f.in_tolerance_pct, f.heat_max
+                        ))
+                        .small()
+                        .color(if f.in_tolerance_pct >= 90.0 {
+                            egui::Color32::from_rgb(90, 210, 110)
+                        } else {
+                            egui::Color32::from_rgb(235, 170, 80)
+                        }),
+                    );
+                }
+            }
             ui.add_space(2.0);
             if fitting {
                 ui.horizontal(|ui| {
@@ -602,6 +728,9 @@ pub fn render_selection(app: &mut App, ui: &mut egui::Ui) {
                 do_export = true;
             }
         });
+        if need_heat {
+            app.ensure_freeform_heat(id);
+        }
         if let Some(p) = new_params {
             app.set_freeform_params(id, p);
         }
