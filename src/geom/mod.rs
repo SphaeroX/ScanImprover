@@ -12,3 +12,4 @@ pub mod segment;
 pub mod symmetry;
 pub mod topology;
 pub mod bridge;
+pub mod fit_to_object;

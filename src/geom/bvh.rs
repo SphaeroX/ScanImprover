@@ -53,13 +53,18 @@ impl Bvh {
         self.tris.len()
     }
 
-    fn tri_verts(&self, t: u32) -> [Vec3; 3] {
+    pub fn tri_verts(&self, t: u32) -> [Vec3; 3] {
         let [a, b, c] = self.tris[t as usize];
         [
             Vec3::from(self.verts[a as usize]),
             Vec3::from(self.verts[b as usize]),
             Vec3::from(self.verts[c as usize]),
         ]
+    }
+
+    pub fn face_normal(&self, t: u32) -> Vec3 {
+        let [a, b, c] = self.tri_verts(t);
+        (b - a).cross(c - a).normalize_or_zero()
     }
 
     pub fn closest_point(&self, p: Vec3) -> (Vec3, u32, f32) {

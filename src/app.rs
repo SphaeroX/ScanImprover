@@ -1,6 +1,7 @@
 use crate::camera::{Camera, ViewDir};
 use crate::geom::bvh::Bvh;
 use crate::geom::distance::Deviation;
+use crate::geom::fit_to_object::{FitToObjectConfig, FittedObjectFeature};
 use crate::geom::fitting::{
     CircleFit, FittedCircle, FittedPlane, PlaneFit, fit_circle, fit_plane, plane_basis,
 };
@@ -37,6 +38,13 @@ pub(crate) const FREEFORM_COLORS: [[f32; 4]; 4] = [
     [0.35, 1.0, 0.55, 0.9], // Spring Green
     [1.0, 0.5, 0.75, 0.9],  // Pink
     [0.95, 0.75, 0.25, 0.9], // Gold
+];
+
+pub(crate) const FIT_FEATURE_COLORS: [[f32; 4]; 4] = [
+    [0.2, 0.75, 1.0, 0.85], // Vibrant Blue
+    [0.95, 0.45, 0.2, 0.85], // Warm Amber / Orange
+    [0.3, 0.95, 0.55, 0.85], // Mint Green
+    [0.85, 0.3, 0.9, 0.85],  // Purple / Violet
 ];
 
 /// Maximum number of source points stored per freeform (fit input is
@@ -105,6 +113,8 @@ pub(crate) struct Snapshot {
     pub(crate) selected_plane_id: Option<u64>,
     pub(crate) selected_circle_id: Option<u64>,
     pub(crate) selected_freeform_id: Option<u64>,
+    pub(crate) fit_features: Vec<FittedObjectFeature>,
+    pub(crate) selected_fit_feature_id: Option<u64>,
     pub(crate) hidden_regions: Vec<HiddenRegion>,
     pub(crate) base_mesh: Option<Arc<Mesh>>,
 }
@@ -160,6 +170,9 @@ pub struct App {
     pub(crate) selected_circle_id: Option<u64>,
     pub(crate) freeforms: Vec<FittedFreeform>,
     pub(crate) selected_freeform_id: Option<u64>,
+    pub(crate) fit_features: Vec<FittedObjectFeature>,
+    pub(crate) selected_fit_feature_id: Option<u64>,
+    pub(crate) fit_config: FitToObjectConfig,
     /// (job id, freeform id) of the freeform fit currently running.
     pub(crate) freeform_job: Option<(u64, u64)>,
     pub(crate) next_obj_id: u64,
@@ -263,6 +276,9 @@ impl App {
             selected_circle_id: None,
             freeforms: Vec::new(),
             selected_freeform_id: None,
+            fit_features: Vec::new(),
+            selected_fit_feature_id: None,
+            fit_config: FitToObjectConfig::default(),
             freeform_job: None,
             next_obj_id: 1,
             hidden_regions: Vec::new(),
@@ -348,6 +364,8 @@ impl App {
                 selected_plane_id: self.selected_plane_id,
                 selected_circle_id: self.selected_circle_id,
                 selected_freeform_id: self.selected_freeform_id,
+                fit_features: self.fit_features.clone(),
+                selected_fit_feature_id: self.selected_fit_feature_id,
                 hidden_regions: self.hidden_regions.clone(),
                 base_mesh: self.base_mesh.clone(),
             });
@@ -374,6 +392,8 @@ impl App {
                     selected_plane_id: self.selected_plane_id,
                     selected_circle_id: self.selected_circle_id,
                     selected_freeform_id: self.selected_freeform_id,
+                    fit_features: self.fit_features.clone(),
+                    selected_fit_feature_id: self.selected_fit_feature_id,
                     hidden_regions: self.hidden_regions.clone(),
                     base_mesh: self.base_mesh.clone(),
                 });
@@ -394,6 +414,8 @@ impl App {
             self.selected_plane_id = s.selected_plane_id;
             self.selected_circle_id = s.selected_circle_id;
             self.selected_freeform_id = s.selected_freeform_id;
+            self.fit_features = s.fit_features;
+            self.selected_fit_feature_id = s.selected_fit_feature_id;
             self.hidden_regions = s.hidden_regions;
             self.base_mesh = s.base_mesh;
             self.update_hidden_mask();
@@ -437,6 +459,8 @@ impl App {
                     selected_freeform_id: self.selected_freeform_id,
                     hidden_regions: self.hidden_regions.clone(),
                     base_mesh: self.base_mesh.clone(),
+                    fit_features: self.fit_features.clone(),
+                    selected_fit_feature_id: self.selected_fit_feature_id,
                 });
                 if self.undo.len() > 25 {
                     self.undo.remove(0);
@@ -457,6 +481,8 @@ impl App {
             self.selected_freeform_id = s.selected_freeform_id;
             self.hidden_regions = s.hidden_regions;
             self.base_mesh = s.base_mesh;
+            self.fit_features = s.fit_features;
+            self.selected_fit_feature_id = s.selected_fit_feature_id;
             self.update_hidden_mask();
             self.freeform_job = None;
             self.deviation = None;
@@ -1192,6 +1218,109 @@ impl App {
             match crate::export::export_freeform_dialog(f) {
                 Ok(msg) => self.status = msg,
                 Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn select_fit_feature(&mut self, id: u64) {
+        self.selected_fit_feature_id = Some(id);
+        self.selected_plane_id = None;
+        self.selected_circle_id = None;
+        self.selected_freeform_id = None;
+        self.aux_dirty = true;
+    }
+
+    pub(crate) fn toggle_fit_feature_visibility(&mut self, id: u64) {
+        if let Some(feat) = self.fit_features.iter_mut().find(|f| f.id == id) {
+            feat.visible = !feat.visible;
+            self.aux_dirty = true;
+        }
+    }
+
+    pub(crate) fn delete_fit_feature(&mut self, id: u64) {
+        self.push_snapshot();
+        self.fit_features.retain(|f| f.id != id);
+        if self.selected_fit_feature_id == Some(id) {
+            self.selected_fit_feature_id = self.fit_features.last().map(|f| f.id);
+        }
+        self.aux_dirty = true;
+        self.status = "Fit feature deleted.".to_string();
+    }
+
+    pub(crate) fn export_fit_feature_id(&mut self, id: u64) {
+        if let Some(feat) = self.fit_features.iter().find(|f| f.id == id) {
+            match crate::export::export_fit_feature_dialog(feat) {
+                Ok(msg) => self.status = msg,
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    pub(crate) fn run_fit_to_object(&mut self) {
+        let Some(target) = self.display().cloned() else {
+            self.status = "No mesh loaded to fit against.".to_string();
+            return;
+        };
+
+        let bvh = match self.ensure_bvh() {
+            Some(b) => b,
+            None => Arc::new(Bvh::new(&target.positions, &target.indices)),
+        };
+
+        // Collect visible freeforms with an evaluated surface
+        let has_patches = self
+            .freeforms
+            .iter()
+            .any(|f| f.visible && f.surface.is_some());
+
+        if !has_patches {
+            self.status =
+                "No visible freeform surfaces to fit. Place and fit freeforms first.".to_string();
+            return;
+        }
+
+        self.push_snapshot();
+
+        let patches: Vec<&Mesh> = self
+            .freeforms
+            .iter()
+            .filter(|f| f.visible)
+            .filter_map(|f| f.surface.as_ref())
+            .collect();
+
+        let id = self.next_obj_id;
+        self.next_obj_id += 1;
+        let col_idx = self.fit_features.len() % FIT_FEATURE_COLORS.len();
+        let color = FIT_FEATURE_COLORS[col_idx];
+
+        match crate::geom::fit_to_object::execute_fit_to_object(
+            &patches,
+            &target,
+            &bvh,
+            &self.fit_config,
+            id,
+            color,
+        ) {
+            Ok(feat) => {
+                let kind_str = match feat.output_type {
+                    crate::geom::fit_to_object::FitOutputType::Faces => "surface sheet body",
+                    crate::geom::fit_to_object::FitOutputType::Solid => "solid body",
+                };
+                let wt_str = if feat.is_watertight {
+                    ", watertight"
+                } else {
+                    ""
+                };
+                self.status = format!(
+                    "Fit to Object complete: created {} with {} triangles{} (RMS: {:.4} mm).",
+                    kind_str, feat.triangle_count, wt_str, feat.rms_dev
+                );
+                self.fit_features.push(feat);
+                self.selected_fit_feature_id = Some(id);
+                self.aux_dirty = true;
+            }
+            Err(err) => {
+                self.status = format!("Fit to Object failed: {err}");
             }
         }
     }
@@ -3102,6 +3231,40 @@ impl App {
                         Vec3::from(*b),
                         edge_col,
                     );
+                }
+            }
+            for feat in &self.fit_features {
+                if !feat.visible {
+                    continue;
+                }
+                let is_sel = self.selected_fit_feature_id == Some(feat.id);
+                let col = feat.color;
+                let fill_col = if is_sel {
+                    [col[0], col[1], col[2], 0.70]
+                } else {
+                    [col[0], col[1], col[2], 0.45]
+                };
+                let edge_col = if is_sel {
+                    [1.0, 1.0, 0.3, 1.0]
+                } else {
+                    [col[0], col[1], col[2], 0.90]
+                };
+                for chunk in feat.mesh.indices.chunks_exact(3) {
+                    for k in 0..3 {
+                        let idx = chunk[k] as usize;
+                        let p = feat.mesh.positions[idx];
+                        fills.push([
+                            p[0], p[1], p[2], fill_col[0], fill_col[1], fill_col[2], fill_col[3],
+                        ]);
+                    }
+                    if is_sel {
+                        let p0 = Vec3::from(feat.mesh.positions[chunk[0] as usize]);
+                        let p1 = Vec3::from(feat.mesh.positions[chunk[1] as usize]);
+                        let p2 = Vec3::from(feat.mesh.positions[chunk[2] as usize]);
+                        push_line(&mut depth_lines, p0, p1, edge_col);
+                        push_line(&mut depth_lines, p1, p2, edge_col);
+                        push_line(&mut depth_lines, p2, p0, edge_col);
+                    }
                 }
             }
             if self.mode == Mode::SymPickLine {

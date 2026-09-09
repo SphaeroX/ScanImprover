@@ -29,6 +29,10 @@ enum BrowserAction {
     ExportPlane(u64),
     ExportCircle(u64),
     ExportFreeform(u64),
+    ExportFitFeature(u64),
+    ToggleFitFeatureVisibility(u64),
+    SelectFitFeature(u64),
+    DeleteFitFeature(u64),
     ExportAllReferences,
     AlignToFeatures,
     ToggleAssign(
@@ -52,6 +56,7 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
         + app.planes.len()
         + app.circles.len()
         + app.freeforms.len()
+        + app.fit_features.len()
         + (if app.sym.is_some() { 1 } else { 0 });
 
     let window_title = format!("Objects ({total_count})");
@@ -861,7 +866,170 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                         }
                     }
 
-                    // --- SECTION 5: SYMMETRY PLANE (if active) ---
+                    // --- SECTION 5: FIT TO OBJECT FEATURES ---
+                    let fit_feat_count = app.fit_features.len();
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("FIT TO OBJECT FEATURES ({fit_feat_count})"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(130, 145, 170)),
+                        );
+                    });
+
+                    if app.fit_features.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No fit-to-object features created yet")
+                                .italics()
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(110)),
+                        );
+                    } else {
+                        for feat in &app.fit_features {
+                            let is_sel = app.selected_fit_feature_id == Some(feat.id);
+                            let col32 = egui::Color32::from_rgba_unmultiplied(
+                                (feat.color[0] * 255.0) as u8,
+                                (feat.color[1] * 255.0) as u8,
+                                (feat.color[2] * 255.0) as u8,
+                                255,
+                            );
+
+                            let bg_color = if is_sel {
+                                egui::Color32::from_rgba_unmultiplied(50, 70, 105, 80)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40)
+                            };
+
+                            let border_stroke = if is_sel {
+                                egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 120),
+                                )
+                            } else {
+                                egui::Stroke::NONE
+                            };
+
+                            egui::Frame::new()
+                                .fill(bg_color)
+                                .stroke(border_stroke)
+                                .corner_radius(4.0)
+                                .inner_margin(egui::Margin::symmetric(6, 5))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        // Visibility toggle
+                                        let mut vis = feat.visible;
+                                        if ui.checkbox(&mut vis, "").changed() {
+                                            actions.push(BrowserAction::ToggleFitFeatureVisibility(feat.id));
+                                        }
+
+                                        // Color indicator dot
+                                        let (dot_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(10.0, 10.0),
+                                            egui::Sense::empty(),
+                                        );
+                                        ui.painter().circle_filled(dot_rect.center(), 4.0, col32);
+
+                                        // Selectable name
+                                        let name_resp = ui.selectable_label(
+                                            is_sel,
+                                            egui::RichText::new(&feat.name).size(12.0).strong(),
+                                        );
+                                        if name_resp.clicked() {
+                                            actions.push(BrowserAction::SelectFitFeature(feat.id));
+                                        }
+
+                                        // Type badge: Surface or Solid
+                                        let (badge_text, badge_color) = match feat.output_type {
+                                            crate::geom::fit_to_object::FitOutputType::Faces => {
+                                                ("Surface", egui::Color32::from_rgb(140, 190, 255))
+                                            }
+                                            crate::geom::fit_to_object::FitOutputType::Solid => {
+                                                if feat.is_watertight {
+                                                    ("Solid · Watertight", egui::Color32::from_rgb(100, 225, 140))
+                                                } else {
+                                                    ("Solid", egui::Color32::from_rgb(235, 180, 80))
+                                                }
+                                            }
+                                        };
+
+                                        ui.label(
+                                            egui::RichText::new(badge_text)
+                                                .size(10.0)
+                                                .color(badge_color),
+                                        );
+
+                                        // Delete button on the right
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .small_button(
+                                                        egui::RichText::new("✕")
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(
+                                                                220, 100, 100,
+                                                            )),
+                                                    )
+                                                    .on_hover_text("Delete fit feature")
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::DeleteFitFeature(feat.id));
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    // If selected, show details & export
+                                    if is_sel {
+                                        ui.add_space(3.0);
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(20.0);
+                                            ui.vertical(|ui| {
+                                                let info_str = if let Some(v) = feat.volume {
+                                                    format!(
+                                                        "{} tris · area: {:.1} mm² · vol: {:.1} mm³",
+                                                        feat.triangle_count, feat.surface_area, v
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "{} tris · area: {:.1} mm²",
+                                                        feat.triangle_count, feat.surface_area
+                                                    )
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(info_str)
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(170, 180, 195)),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "RMS: {:.4} mm · max dev: {:.4} mm",
+                                                        feat.rms_dev, feat.max_dev
+                                                    ))
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(140, 150, 165)),
+                                                );
+
+                                                ui.add_space(2.0);
+                                                if ui
+                                                    .small_button("Export Feature…")
+                                                    .on_hover_text("Export feature as 3D mesh (STL, OBJ, PLY)")
+                                                    .clicked()
+                                                {
+                                                    actions.push(BrowserAction::ExportFitFeature(feat.id));
+                                                }
+                                            });
+                                        });
+                                    }
+                                });
+                            ui.add_space(2.0);
+                        }
+                    }
+
+                    // --- SECTION 6: SYMMETRY PLANE (if active) ---
                     let sym_show = app.sym.map(|s| s.show);
                     if let Some(mut show) = sym_show {
                         let feat = crate::geom::alignment::FeatureRef::SymmetryPlane;
@@ -1046,6 +1214,18 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
             }
             BrowserAction::ExportFreeform(id) => {
                 app.export_freeform_id(id);
+            }
+            BrowserAction::ToggleFitFeatureVisibility(id) => {
+                app.toggle_fit_feature_visibility(id);
+            }
+            BrowserAction::SelectFitFeature(id) => {
+                app.select_fit_feature(id);
+            }
+            BrowserAction::DeleteFitFeature(id) => {
+                app.delete_fit_feature(id);
+            }
+            BrowserAction::ExportFitFeature(id) => {
+                app.export_fit_feature_id(id);
             }
             BrowserAction::ToggleSymmetryVisibility => {
                 if let Some(sym) = &mut app.sym {
