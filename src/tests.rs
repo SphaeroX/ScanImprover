@@ -2081,5 +2081,66 @@ mod tests {
         let col_spec_max = freeform_vertex_color(0.25, 0.2, FreeformGradient::Spectrum, 1.0);
         assert!(col_spec_max[0] > 0.9 && col_spec_max[2] < 0.1, "Clamped max dist in spectrum must be red: {:?}", col_spec_max);
     }
+
+    #[test]
+    fn step_export_syntax_has_no_double_parentheses_on_sets() {
+        use crate::export::step::{generate_freeform_step, generate_step};
+        use crate::geom::fitting::FittedPlane;
+        use crate::geom::freeform::BicubicNet;
+
+        // Test plane step export
+        let plane = FittedPlane {
+            id: 1,
+            name: "Test Plane".to_string(),
+            fit: crate::geom::fitting::PlaneFit {
+                point: glam::Vec3::ZERO,
+                normal: glam::Vec3::Z,
+                rms: 0.0,
+                max_dev: 0.0,
+            },
+            color: [1.0, 1.0, 1.0, 1.0],
+            visible: true,
+        };
+        let plane_step = generate_step(&[&plane], &[], 100.0);
+        assert!(plane_step.contains("PRODUCT('Reference Geometry','Reference Geometry','',(#"));
+        assert!(plane_step.contains("ADVANCED_FACE('Test Plane',(#"));
+        assert!(plane_step.contains("SHELL_BASED_SURFACE_MODEL('Reference Surfaces',(#"));
+        assert!(plane_step.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Reference Geometry',(#"));
+
+        // Test freeform step export
+        let mut cps = vec![vec![glam::Vec3::ZERO; 4]; 4];
+        for j in 0..4 {
+            for i in 0..4 {
+                cps[j][i] = glam::Vec3::new(i as f32, j as f32, 0.0);
+            }
+        }
+        let net = BicubicNet {
+            deg_u: 3,
+            deg_v: 3,
+            cps,
+            u_knots_full: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            v_knots_full: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            nx: 3,
+            ny: 3,
+        };
+        let ff_step = generate_freeform_step("Test Freeform", &net);
+        assert!(ff_step.contains("PRODUCT('Freeform Surface','Freeform Surface','',(#"));
+        assert!(ff_step.contains("ADVANCED_FACE('Test Freeform',(#"));
+        assert!(ff_step.contains("SHELL_BASED_SURFACE_MODEL('Freeform Surface',(#"));
+        assert!(ff_step.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Freeform Surface',(#"));
+
+        // Verify that outside of B_SPLINE_SURFACE_WITH_KNOTS 2D control point array,
+        // FILE_DESCRIPTION, FILE_SCHEMA and complex entities, there are no ((#
+        for line in ff_step.lines() {
+            if line.contains("B_SPLINE_SURFACE_WITH_KNOTS") || line.contains("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT") {
+                continue;
+            }
+            assert!(
+                !line.contains("((#"),
+                "Invalid nested set parentheses found in line: {}",
+                line
+            );
+        }
+    }
 }
 

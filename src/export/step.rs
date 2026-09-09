@@ -47,7 +47,7 @@ pub fn generate_step(
     let prod_id = id;
     writeln!(
         out,
-        "#{id} = PRODUCT('Reference Geometry','Reference Geometry','',((#{pctx_id})));"
+        "#{id} = PRODUCT('Reference Geometry','Reference Geometry','',(#{pctx_id}));"
     )
     .unwrap();
     id += 1;
@@ -269,7 +269,7 @@ pub fn generate_step(
         let face_id = id;
         writeln!(
             out,
-            "#{id} = ADVANCED_FACE('{}',((#{bound_id})),#{plane_surf_id},.T.);",
+            "#{id} = ADVANCED_FACE('{}',(#{bound_id}),#{plane_surf_id},.T.);",
             p.name
         )
         .unwrap();
@@ -395,7 +395,7 @@ pub fn generate_step(
         let face_id = id;
         writeln!(
             out,
-            "#{id} = ADVANCED_FACE('{}',((#{bound_id})),#{plane_surf_id},.T.);",
+            "#{id} = ADVANCED_FACE('{}',(#{bound_id}),#{plane_surf_id},.T.);",
             c.name
         )
         .unwrap();
@@ -423,7 +423,7 @@ pub fn generate_step(
     let sbsm_id = id;
     writeln!(
         out,
-        "#{id} = SHELL_BASED_SURFACE_MODEL('Reference Surfaces',((#{shell_id})));"
+        "#{id} = SHELL_BASED_SURFACE_MODEL('Reference Surfaces',(#{shell_id}));"
     )
     .unwrap();
     id += 1;
@@ -431,7 +431,7 @@ pub fn generate_step(
     let rep_id = id;
     writeln!(
         out,
-        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Reference Geometry',((#{sbsm_id},#{world_axis_id})),#{unctx_id});"
+        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Reference Geometry',(#{sbsm_id},#{world_axis_id}),#{unctx_id});"
     )
     .unwrap();
     id += 1;
@@ -516,7 +516,7 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     writeln!(out, "#{id} = PRODUCT_CONTEXT('',#{ctx_id},'mechanical');").unwrap();
     id += 1;
     let prod_id = id;
-    writeln!(out, "#{id} = PRODUCT('Freeform Surface','Freeform Surface','',((#{pctx_id})));").unwrap();
+    writeln!(out, "#{id} = PRODUCT('Freeform Surface','Freeform Surface','',(#{pctx_id}));").unwrap();
     id += 1;
     let pdf_id = id;
     writeln!(out, "#{id} = PRODUCT_DEFINITION_FORMATION('','',#{prod_id});").unwrap();
@@ -707,7 +707,7 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     let face_id = id;
     writeln!(
         out,
-        "#{id} = ADVANCED_FACE('{}',((#{bound_id})),#{surf_id},.T.);",
+        "#{id} = ADVANCED_FACE('{}',(#{bound_id}),#{surf_id},.T.);",
         name.replace('\'', "''")
     )
     .unwrap();
@@ -718,12 +718,12 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     writeln!(out, "#{id} = OPEN_SHELL('',(#{face_id}));").unwrap();
     id += 1;
     let sbsm_id = id;
-    writeln!(out, "#{id} = SHELL_BASED_SURFACE_MODEL('Freeform Surface',((#{shell_id})));").unwrap();
+    writeln!(out, "#{id} = SHELL_BASED_SURFACE_MODEL('Freeform Surface',(#{shell_id}));").unwrap();
     id += 1;
     let rep_id = id;
     writeln!(
         out,
-        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Freeform Surface',((#{sbsm_id},#{world_axis_id})),#{unctx_id});"
+        "#{id} = MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Freeform Surface',(#{sbsm_id},#{world_axis_id}),#{unctx_id});"
     )
     .unwrap();
     id += 1;
