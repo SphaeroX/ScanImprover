@@ -103,9 +103,13 @@ fn fs_main(in: VsOut, @builtin(front_facing) is_front: bool) -> @location(0) vec
     var spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
 
     var col = vec3<f32>(0.72, 0.74, 0.78);
-    // Backface / inside coloring: distinct warm terracotta tone with subdued specular
+    // Backface / inside coloring: soft light yellow with subtle diagonal pattern
+    var back_col = vec3<f32>(0.93, 0.86, 0.48);
     if (!is_front) {
-        col = vec3<f32>(0.76, 0.40, 0.28);
+        // Subtle diagonal hatching pattern (~16px period)
+        let pat = 0.5 + 0.5 * sin((in.pos.x + in.pos.y) * 0.3927);
+        back_col = mix(vec3<f32>(0.93, 0.86, 0.48), vec3<f32>(0.82, 0.72, 0.32), pat * 0.28);
+        col = back_col;
         spec = spec * 0.15;
     }
 
@@ -116,14 +120,14 @@ fn fs_main(in: VsOut, @builtin(front_facing) is_front: bool) -> @location(0) vec
         if (is_front) {
             col = gcol;
         } else {
-            col = mix(gcol * 0.65, vec3<f32>(0.76, 0.40, 0.28), 0.45);
+            col = mix(gcol * 0.65, back_col, 0.45);
         }
     } else if (U.params.z > 0.5 && in.aux.z <= -3.0) {
         let tcol = type_color(-in.aux.z);
         if (is_front) {
             col = tcol;
         } else {
-            col = mix(tcol * 0.65, vec3<f32>(0.76, 0.40, 0.28), 0.45);
+            col = mix(tcol * 0.65, back_col, 0.45);
         }
     } else if (U.params.z > 0.5 && in.aux.z <= -2.5) {
         col = vec3<f32>(0.16, 0.17, 0.21);
@@ -133,7 +137,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) is_front: bool) -> @location(0) vec
         if (is_front) {
             col = hcol;
         } else {
-            col = mix(hcol * 0.70, vec3<f32>(0.76, 0.40, 0.28), 0.35);
+            col = mix(hcol * 0.70, back_col, 0.35);
         }
     }
     if (U.params.z > 0.5 && U.params.w >= 0.0 && abs(in.aux.w - U.params.w) < 0.5) {
