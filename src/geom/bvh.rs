@@ -118,6 +118,16 @@ impl Bvh {
     }
 
     pub fn ray_cast(&self, ro: Vec3, rd: Vec3, tmax: f32) -> Option<(f32, u32)> {
+        self.ray_cast_filtered(ro, rd, tmax, |_| false)
+    }
+
+    pub fn ray_cast_filtered(
+        &self,
+        ro: Vec3,
+        rd: Vec3,
+        tmax: f32,
+        is_hidden: impl Fn(u32) -> bool,
+    ) -> Option<(f32, u32)> {
         if self.tris.is_empty() {
             return None;
         }
@@ -140,6 +150,9 @@ impl Bvh {
                 let first = self.node_left[n] as usize;
                 for k in 0..cnt as usize {
                     let t = self.tri_order[first + k];
+                    if is_hidden(t) {
+                        continue;
+                    }
                     let [a, b, c] = self.tri_verts(t);
                     if let Some(th) = ray_triangle(ro, rd, a, b, c) {
                         if th < best_t {
@@ -175,7 +188,18 @@ impl Bvh {
         if hit { Some((best_t, best_tri)) } else { None }
     }
 
+    #[allow(dead_code)]
     pub fn query_sphere(&self, center: Vec3, radius: f32, out: &mut Vec<u32>) {
+        self.query_sphere_filtered(center, radius, out, |_| false);
+    }
+
+    pub fn query_sphere_filtered(
+        &self,
+        center: Vec3,
+        radius: f32,
+        out: &mut Vec<u32>,
+        is_hidden: impl Fn(u32) -> bool,
+    ) {
         if self.tris.is_empty() {
             return;
         }
@@ -197,6 +221,9 @@ impl Bvh {
                 let first = self.node_left[n] as usize;
                 for k in 0..cnt as usize {
                     let t = self.tri_order[first + k];
+                    if is_hidden(t) {
+                        continue;
+                    }
                     let [a, b, c] = self.tri_verts(t);
                     if (a - center).length_squared() <= r2
                         || (b - center).length_squared() <= r2

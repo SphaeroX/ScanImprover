@@ -10,17 +10,30 @@ pub struct Hit {
 }
 
 pub fn ray_pick(bvh: &Bvh, cam: &Camera, sx: f32, sy: f32, w: f32, h: f32) -> Option<Hit> {
+    ray_pick_filtered(bvh, cam, sx, sy, w, h, |_| false)
+}
+
+pub fn ray_pick_filtered(
+    bvh: &Bvh,
+    cam: &Camera,
+    sx: f32,
+    sy: f32,
+    w: f32,
+    h: f32,
+    is_hidden: impl Fn(u32) -> bool,
+) -> Option<Hit> {
     let (ro, rd) = cam.screen_ray(sx, sy, w, h);
     if rd.length_squared() < 0.5 {
         return None;
     }
-    let (t, tri) = bvh.ray_cast(ro, rd, cam.far)?;
+    let (t, tri) = bvh.ray_cast_filtered(ro, rd, cam.far, is_hidden)?;
     Some(Hit {
         pos: ro + rd * t,
         tri,
     })
 }
 
+#[allow(dead_code)]
 pub fn query_brush_triangles(
     mesh: &Mesh,
     bvh: &Bvh,
@@ -28,6 +41,18 @@ pub fn query_brush_triangles(
     hit: &Hit,
     radius_px: f32,
     viewport_h_px: f32,
+) -> (f32, Vec<u32>) {
+    query_brush_triangles_filtered(mesh, bvh, cam, hit, radius_px, viewport_h_px, |_| false)
+}
+
+pub fn query_brush_triangles_filtered(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    cam: &Camera,
+    hit: &Hit,
+    radius_px: f32,
+    viewport_h_px: f32,
+    is_hidden: impl Fn(u32) -> bool,
 ) -> (f32, Vec<u32>) {
     let eye = cam.eye();
     let depth = (hit.pos - eye).length();
@@ -38,14 +63,16 @@ pub fn query_brush_triangles(
     let indices = &mesh.indices;
 
     let mut candidates = Vec::new();
-    bvh.query_sphere(hit_pos, r, &mut candidates);
+    bvh.query_sphere_filtered(hit_pos, r, &mut candidates, &is_hidden);
     candidates.sort_unstable();
     candidates.dedup();
 
     let mut result = Vec::with_capacity(candidates.len() + 1);
-    result.push(hit.tri);
+    if !is_hidden(hit.tri) {
+        result.push(hit.tri);
+    }
     for t in candidates {
-        if t == hit.tri {
+        if t == hit.tri || is_hidden(t) {
             continue;
         }
         let t_usize = t as usize;
@@ -83,7 +110,21 @@ pub fn brush(
     add: bool,
     sel: &mut [u8],
 ) {
-    let (_, tris) = query_brush_triangles(mesh, bvh, cam, hit, radius_px, viewport_h_px);
+    brush_filtered(mesh, bvh, cam, hit, radius_px, viewport_h_px, add, sel, |_| false);
+}
+
+pub fn brush_filtered(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    cam: &Camera,
+    hit: &Hit,
+    radius_px: f32,
+    viewport_h_px: f32,
+    add: bool,
+    sel: &mut [u8],
+    is_hidden: impl Fn(u32) -> bool,
+) {
+    let (_, tris) = query_brush_triangles_filtered(mesh, bvh, cam, hit, radius_px, viewport_h_px, is_hidden);
     let value = if add { 1u8 } else { 0u8 };
     for t in tris {
         if (t as usize) < sel.len() {

@@ -82,7 +82,13 @@ pub struct HiddenRegion {
     pub id: u64,
     pub name: String,
     pub visible: bool,
-    pub mesh: Arc<Mesh>,
+    pub faces: Vec<u32>,
+}
+
+impl HiddenRegion {
+    pub fn triangle_count(&self) -> usize {
+        self.faces.len()
+    }
 }
 
 #[derive(Clone)]
@@ -158,6 +164,7 @@ pub struct App {
     pub(crate) freeform_job: Option<(u64, u64)>,
     pub(crate) next_obj_id: u64,
     pub(crate) hidden_regions: Vec<HiddenRegion>,
+    pub(crate) hidden_mask: Vec<bool>,
     pub(crate) base_mesh: Option<Arc<Mesh>>,
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
@@ -259,6 +266,7 @@ impl App {
             freeform_job: None,
             next_obj_id: 1,
             hidden_regions: Vec::new(),
+            hidden_mask: Vec::new(),
             base_mesh: None,
             show_mesh: true,
             show_object_browser: true,
@@ -388,6 +396,7 @@ impl App {
             self.selected_freeform_id = s.selected_freeform_id;
             self.hidden_regions = s.hidden_regions;
             self.base_mesh = s.base_mesh;
+            self.update_hidden_mask();
             self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
@@ -448,6 +457,7 @@ impl App {
             self.selected_freeform_id = s.selected_freeform_id;
             self.hidden_regions = s.hidden_regions;
             self.base_mesh = s.base_mesh;
+            self.update_hidden_mask();
             self.freeform_job = None;
             self.deviation = None;
             self.heat = None;
@@ -567,11 +577,6 @@ impl App {
             let mut m2 = (**m).clone();
             m2.transform(rot, trans);
             new_base = Some(Arc::new(m2));
-        }
-        for hr in &mut self.hidden_regions {
-            let mut m2 = (*hr.mesh).clone();
-            m2.transform(rot, trans);
-            hr.mesh = Arc::new(m2);
         }
         self.current = new_current;
         self.original = new_original;
@@ -1511,36 +1516,32 @@ impl App {
         }
     }
 
-    pub(crate) fn sync_visible_mesh(&mut self) {
-        let base = match &self.base_mesh {
-            Some(b) => b.clone(),
-            None => match &self.current {
-                Some(c) => c.clone(),
-                None => return,
-            },
-        };
-
-        let mut combined = (*base).clone();
+    pub(crate) fn update_hidden_mask(&mut self) {
+        let nt = self.current.as_ref().map(|m| m.triangle_count()).unwrap_or(0);
+        let mut mask = vec![false; nt];
         for hr in &self.hidden_regions {
-            if hr.visible {
-                combined = combined.combine(&hr.mesh);
+            if !hr.visible {
+                for &f in &hr.faces {
+                    if (f as usize) < nt {
+                        mask[f as usize] = true;
+                    }
+                }
             }
         }
+        self.hidden_mask = mask;
+    }
 
-        let m = Arc::new(combined);
-        let tris = m.triangle_count();
-        self.current = Some(m);
-        self.sel = Arc::new(vec![0u8; tris]);
-        self.sel_count = 0;
-        self.bvh = None;
-        self.topology = None;
-        self.invalidate_face_groups();
-        self.hover_hit = None;
-        self.hover_tris.clear();
+    pub(crate) fn is_face_hidden(&self, tri: u32) -> bool {
+        let t = tri as usize;
+        t < self.hidden_mask.len() && self.hidden_mask[t]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn sync_visible_mesh(&mut self) {
+        self.update_hidden_mask();
         self.mesh_dirty = true;
-        self.aux_dirty = true;
         self.wire_dirty = true;
-        self.sync_bbox();
+        self.aux_dirty = true;
     }
 
     pub(crate) fn hide_selection(&mut self) {
@@ -1548,19 +1549,36 @@ impl App {
             return;
         }
         let Some(m) = self.current.clone() else { return; };
-        if self.sel.len() != m.triangle_count() {
+        let nt = m.triangle_count();
+        if self.sel.len() != nt {
+            return;
+        }
+
+        let mut selected_faces = Vec::with_capacity(self.sel_count);
+        for t in 0..nt {
+            if self.sel[t] > 0 {
+                selected_faces.push(t as u32);
+            }
+        }
+
+        if selected_faces.is_empty() {
+            return;
+        }
+
+        let mut prospective_hidden = 0usize;
+        for t in 0..nt {
+            if self.is_face_hidden(t as u32) || self.sel[t] > 0 {
+                prospective_hidden += 1;
+            }
+        }
+        if prospective_hidden >= nt {
+            self.status = "Cannot hide all faces of the mesh.".to_string();
             return;
         }
 
         self.push_snapshot();
 
-        let (kept_mesh, hidden_mesh) = m.split_by_selection(&self.sel);
-        if kept_mesh.triangle_count() == 0 {
-            self.status = "Cannot hide all faces of the mesh.".to_string();
-            return;
-        }
-
-        let hidden_tris = hidden_mesh.triangle_count();
+        let hidden_tris = selected_faces.len();
         let id = self.next_obj_id;
         self.next_obj_id += 1;
         let name = format!("Hidden Region {}", self.hidden_regions.len() + 1);
@@ -1569,11 +1587,17 @@ impl App {
             id,
             name: name.clone(),
             visible: false,
-            mesh: Arc::new(hidden_mesh),
+            faces: selected_faces,
         });
 
-        self.base_mesh = Some(Arc::new(kept_mesh));
-        self.sync_visible_mesh();
+        self.sel = Arc::new(vec![0u8; nt]);
+        self.sel_count = 0;
+        self.hover_hit = None;
+        self.hover_tris.clear();
+        self.update_hidden_mask();
+        self.mesh_dirty = true;
+        self.wire_dirty = true;
+        self.aux_dirty = true;
 
         self.status = format!("Hidden {hidden_tris} faces into '{name}'.");
     }
@@ -1586,7 +1610,10 @@ impl App {
             hr.visible = !hr.visible;
             let vis = hr.visible;
             let name = hr.name.clone();
-            self.sync_visible_mesh();
+            self.update_hidden_mask();
+            self.mesh_dirty = true;
+            self.wire_dirty = true;
+            self.aux_dirty = true;
             self.status = if vis {
                 format!("Showing '{name}'.")
             } else {
@@ -1600,29 +1627,10 @@ impl App {
         if let Some(i) = idx {
             self.push_snapshot();
             let hr = self.hidden_regions.remove(i);
-            let base = self.base_mesh.take().or_else(|| self.current.clone());
-            if let Some(b) = base {
-                let combined = b.combine(&hr.mesh);
-                self.base_mesh = Some(Arc::new(combined));
-            }
-            if self.hidden_regions.is_empty() {
-                self.current = self.base_mesh.clone();
-                self.base_mesh = None;
-            } else {
-                self.sync_visible_mesh();
-            }
-            let tris = self.current.as_ref().map(|m| m.triangle_count()).unwrap_or(0);
-            self.sel = Arc::new(vec![0u8; tris]);
-            self.sel_count = 0;
-            self.bvh = None;
-            self.topology = None;
-            self.invalidate_face_groups();
-            self.hover_hit = None;
-            self.hover_tris.clear();
+            self.update_hidden_mask();
             self.mesh_dirty = true;
-            self.aux_dirty = true;
             self.wire_dirty = true;
-            self.sync_bbox();
+            self.aux_dirty = true;
             self.status = format!("Restored '{}' back into the mesh.", hr.name);
         }
     }
@@ -1632,27 +1640,11 @@ impl App {
             return;
         }
         self.push_snapshot();
-        let base_opt = self.base_mesh.take().or_else(|| self.current.clone());
-        let Some(base_mesh) = base_opt else { return; };
-        let mut base = (*base_mesh).clone();
-        for hr in self.hidden_regions.drain(..) {
-            base = base.combine(&hr.mesh);
-        }
-        self.base_mesh = None;
-        let m = Arc::new(base);
-        let tris = m.triangle_count();
-        self.current = Some(m);
-        self.sel = Arc::new(vec![0u8; tris]);
-        self.sel_count = 0;
-        self.bvh = None;
-        self.topology = None;
-        self.invalidate_face_groups();
-        self.hover_hit = None;
-        self.hover_tris.clear();
+        self.hidden_regions.clear();
+        self.update_hidden_mask();
         self.mesh_dirty = true;
-        self.aux_dirty = true;
         self.wire_dirty = true;
-        self.sync_bbox();
+        self.aux_dirty = true;
         self.status = "All hidden regions restored to mesh.".to_string();
     }
 
@@ -1661,13 +1653,17 @@ impl App {
         if let Some(i) = idx {
             self.push_snapshot();
             let hr = self.hidden_regions.remove(i);
-            if hr.visible {
-                self.sync_visible_mesh();
+            let Some(m) = self.current.clone() else { return; };
+            let mut del_sel = vec![0u8; m.triangle_count()];
+            for &f in &hr.faces {
+                if (f as usize) < del_sel.len() {
+                    del_sel[f as usize] = 1;
+                }
             }
-            if self.hidden_regions.is_empty() {
-                self.base_mesh = None;
-            }
-            self.status = format!("Deleted '{}'.", hr.name);
+            let (kept_mesh, _) = m.split_by_selection(&del_sel);
+            self.set_mesh_modified(kept_mesh, format!("Deleted '{}'.", hr.name));
+            self.hidden_regions.clear();
+            self.update_hidden_mask();
         }
     }
 
@@ -1960,6 +1956,8 @@ impl App {
             self.hover_tris.clear();
             self.deviation = None;
             self.heat = None;
+            self.hidden_regions.clear();
+            self.update_hidden_mask();
             self.mesh_dirty = true;
             self.aux_dirty = true;
             self.wire_dirty = true;
@@ -1983,6 +1981,8 @@ impl App {
         self.hover_tris.clear();
         self.deviation = None;
         self.heat = None;
+        self.hidden_regions.clear();
+        self.update_hidden_mask();
         self.mesh_dirty = true;
         self.aux_dirty = true;
         self.wire_dirty = true;
@@ -2756,17 +2756,22 @@ impl App {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let sx = pos.x - rect.min.x;
                             let sy = pos.y - rect.min.y;
-                            if let Some(hit) = pick::ray_pick(
+                            let is_hidden = |t: u32| {
+                                let tu = t as usize;
+                                tu < self.hidden_mask.len() && self.hidden_mask[tu]
+                            };
+                            if let Some(hit) = pick::ray_pick_filtered(
                                 &bvh,
                                 &self.camera,
                                 sx,
                                 sy,
                                 rect.width(),
                                 rect.height(),
+                                &is_hidden,
                             ) {
                                 let mut sel = self.sel.clone();
                                 let sel_slice: &mut Vec<u8> = Arc::make_mut(&mut sel);
-                                pick::brush(
+                                pick::brush_filtered(
                                     &mesh,
                                     &bvh,
                                     &self.camera,
@@ -2775,6 +2780,7 @@ impl App {
                                     rect.height(),
                                     is_add,
                                     sel_slice,
+                                    &is_hidden,
                                 );
                                 self.sel = sel;
                                 self.recount_sel();
@@ -2801,9 +2807,19 @@ impl App {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
                 if let Some(bvh) = self.ensure_bvh() {
-                    if let Some(hit) =
-                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                    {
+                    let is_hidden = |t: u32| {
+                        let tu = t as usize;
+                        tu < self.hidden_mask.len() && self.hidden_mask[tu]
+                    };
+                    if let Some(hit) = pick::ray_pick_filtered(
+                        &bvh,
+                        &self.camera,
+                        sx,
+                        sy,
+                        rect.width(),
+                        rect.height(),
+                        &is_hidden,
+                    ) {
                         self.select_region_under(hit.tri);
                     }
                 }
@@ -2820,16 +2836,27 @@ impl App {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
                 if let (Some(mesh), Some(bvh)) = (self.display().cloned(), self.ensure_bvh()) {
-                    if let Some(hit) =
-                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                    {
-                        let (r, tris) = pick::query_brush_triangles(
+                    let is_hidden = |t: u32| {
+                        let tu = t as usize;
+                        tu < self.hidden_mask.len() && self.hidden_mask[tu]
+                    };
+                    if let Some(hit) = pick::ray_pick_filtered(
+                        &bvh,
+                        &self.camera,
+                        sx,
+                        sy,
+                        rect.width(),
+                        rect.height(),
+                        &is_hidden,
+                    ) {
+                        let (r, tris) = pick::query_brush_triangles_filtered(
                             &mesh,
                             &bvh,
                             &self.camera,
                             &hit,
                             self.brush_radius,
                             rect.height(),
+                            &is_hidden,
                         );
                         new_hover_hit = Some(hit);
                         new_hover_tris = tris;
@@ -2873,9 +2900,20 @@ impl App {
                 let sx = pos.x - rect.min.x;
                 let sy = pos.y - rect.min.y;
                 if let Some(bvh) = self.ensure_bvh() {
-                    hover_pos_3d =
-                        pick::ray_pick(&bvh, &self.camera, sx, sy, rect.width(), rect.height())
-                            .map(|h| h.pos);
+                    let is_hidden = |t: u32| {
+                        let tu = t as usize;
+                        tu < self.hidden_mask.len() && self.hidden_mask[tu]
+                    };
+                    hover_pos_3d = pick::ray_pick_filtered(
+                        &bvh,
+                        &self.camera,
+                        sx,
+                        sy,
+                        rect.width(),
+                        rect.height(),
+                        &is_hidden,
+                    )
+                    .map(|h| h.pos);
                 }
             }
         }
@@ -3210,14 +3248,14 @@ impl App {
                 gpu.set_viewport_px(vp_w, vp_h);
                 if self.mesh_dirty {
                     if let Some(m) = self.display() {
-                        gpu.upload_mesh(m);
+                        gpu.upload_mesh(m, Some(&self.hidden_mask));
                         self.mesh_dirty = false;
                         self.wire_dirty = true;
                     }
                 }
                 if self.wire_dirty && self.show_wireframe {
                     if let Some(m) = self.display() {
-                        if !gpu.upload_wireframe(m, 800_000) {
+                        if !gpu.upload_wireframe(m, 800_000, Some(&self.hidden_mask)) {
                             self.status = "Wireframe disabled: mesh too dense (> 800k triangles)."
                                 .to_string();
                         }
@@ -3279,6 +3317,9 @@ impl App {
                         }
                         if self.sel.len() == m.triangle_count() {
                             for t in 0..m.triangle_count() {
+                                if self.is_face_hidden(t as u32) {
+                                    continue;
+                                }
                                 if self.sel[t] > 0 {
                                     for k in 0..3 {
                                         let v = m.indices[3 * t + k] as usize;

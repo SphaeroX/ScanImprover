@@ -597,7 +597,7 @@ impl GpuState {
         }
     }
 
-    pub fn upload_mesh(&mut self, mesh: &Mesh) {
+    pub fn upload_mesh(&mut self, mesh: &Mesh, hidden_mask: Option<&[bool]>) {
         let nv = mesh.positions.len();
         let mut geom: Vec<[f32; 6]> = Vec::with_capacity(nv);
         for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
@@ -610,11 +610,27 @@ impl GpuState {
                 contents: bytemuck::cast_slice(&geom),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+
+        let indices: Vec<u32> = if let Some(mask) = hidden_mask {
+            let mut vis = Vec::with_capacity(mesh.indices.len());
+            for (t, chunk) in mesh.indices.chunks_exact(3).enumerate() {
+                if t < mask.len() && mask[t] {
+                    continue;
+                }
+                vis.extend_from_slice(chunk);
+            }
+            vis
+        } else {
+            mesh.indices.clone()
+        };
+
+        let tri_count = (indices.len() / 3) as u32;
+
         let ib = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("scanimprover-mesh-ib"),
-                contents: bytemuck::cast_slice(&mesh.indices),
+                contents: bytemuck::cast_slice(&indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
         let aux_data = vec![[0.0f32, 0.0, -1.0, -1.0]; nv];
@@ -628,7 +644,7 @@ impl GpuState {
         self.mesh = Some(MeshGpu {
             vb,
             ib,
-            tri_count: mesh.triangle_count() as u32,
+            tri_count,
             vert_count: nv as u32,
         });
         self.wire.buf = None;
@@ -650,7 +666,12 @@ impl GpuState {
         }
     }
 
-    pub fn upload_wireframe(&mut self, mesh: &Mesh, max_tris: usize) -> bool {
+    pub fn upload_wireframe(
+        &mut self,
+        mesh: &Mesh,
+        max_tris: usize,
+        hidden_mask: Option<&[bool]>,
+    ) -> bool {
         if mesh.triangle_count() > max_tris {
             self.wire_verts = 0;
             self.wire.buf = None;
@@ -677,6 +698,11 @@ impl GpuState {
             }
         };
         for t in 0..mesh.triangle_count() {
+            if let Some(mask) = hidden_mask {
+                if t < mask.len() && mask[t] {
+                    continue;
+                }
+            }
             let i0 = mesh.indices[3 * t] as usize;
             let i1 = mesh.indices[3 * t + 1] as usize;
             let i2 = mesh.indices[3 * t + 2] as usize;

@@ -2184,6 +2184,7 @@ mod tests {
         let mut app = crate::app::App::new();
         let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
         let total_tris = m.triangle_count();
+        let orig_verts = m.vertex_count();
         app.current = Some(m.clone());
         app.original = Some(m.clone());
         let mut sel = vec![0u8; total_tris];
@@ -2198,40 +2199,53 @@ mod tests {
         let hr_id = app.hidden_regions[0].id;
         assert_eq!(app.hidden_regions[0].name, "Hidden Region 1");
         assert_eq!(app.hidden_regions[0].visible, false);
-        assert_eq!(app.hidden_regions[0].mesh.triangle_count(), 2);
-        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+        assert_eq!(app.hidden_regions[0].triangle_count(), 2);
+        // Mesh itself remains completely whole and intact!
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+        assert_eq!(app.current.as_ref().unwrap().vertex_count(), orig_verts);
         assert_eq!(app.sel_count, 0);
+        assert!(app.is_face_hidden(0));
+        assert!(app.is_face_hidden(1));
+        assert!(!app.is_face_hidden(2));
 
         // Toggle visibility to true (einblenden)
         app.toggle_hidden_region_visibility(hr_id);
         assert_eq!(app.hidden_regions[0].visible, true);
+        assert!(!app.is_face_hidden(0));
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
 
         // Toggle visibility back to false (ausblenden)
         app.toggle_hidden_region_visibility(hr_id);
         assert_eq!(app.hidden_regions[0].visible, false);
-        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+        assert!(app.is_face_hidden(0));
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
 
         // Restore back to mesh permanently
         app.restore_hidden_region(hr_id);
         assert!(app.hidden_regions.is_empty());
+        assert!(!app.is_face_hidden(0));
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+        assert_eq!(app.current.as_ref().unwrap().vertex_count(), orig_verts);
 
         // Test Undo of restore
         app.undo();
         assert_eq!(app.hidden_regions.len(), 1);
-        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 10);
+        assert!(app.is_face_hidden(0));
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+        assert_eq!(app.current.as_ref().unwrap().vertex_count(), orig_verts);
 
         // Test Redo
         app.redo();
         assert!(app.hidden_regions.is_empty());
+        assert!(!app.is_face_hidden(0));
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+        assert_eq!(app.current.as_ref().unwrap().vertex_count(), orig_verts);
     }
 
     #[test]
     fn hidden_region_ray_picking_penetration() {
         use crate::camera::Camera;
-        use crate::pick::ray_pick;
+        use crate::pick::{ray_pick, ray_pick_filtered};
 
         // Create a front box at z = 0 and a rear box at z = 10
         let front = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
@@ -2266,12 +2280,50 @@ mod tests {
         app.hide_selection();
 
         assert_eq!(app.hidden_regions.len(), 1);
-        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
+        // Mesh still has 24 triangles intact!
+        assert_eq!(app.current.as_ref().unwrap().triangle_count(), 24);
 
-        // Now picking center penetrates right through the hidden front box and hits the rear box!
-        let bvh2 = app.ensure_bvh().expect("BVH should build for visible mesh");
-        let hit2 = ray_pick(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0).expect("Should hit rear box");
+        // Now picking center with filter penetrates right through the hidden front box and hits the rear box!
+        let bvh2 = app.ensure_bvh().expect("BVH should build");
+        let is_hidden = |t: u32| app.is_face_hidden(t);
+        let hit2 = ray_pick_filtered(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0, &is_hidden).expect("Should hit rear box");
         assert!(hit2.pos.z > 8.0, "Hit should penetrate and be on rear box (z > 8.0), got z = {}", hit2.pos.z);
+    }
+
+    #[test]
+    fn test_hide_and_restore_preserves_exact_mesh_geometry() {
+        let mut app = crate::app::App::new();
+        let m = std::sync::Arc::new(box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0));
+        let total_tris = m.triangle_count();
+        let orig_positions = m.positions.clone();
+        let orig_indices = m.indices.clone();
+
+        app.current = Some(m.clone());
+        app.original = Some(m.clone());
+
+        // Hide half the box
+        let mut sel = vec![0u8; total_tris];
+        for i in 0..6 {
+            sel[i] = 1;
+        }
+        app.sel = std::sync::Arc::new(sel);
+        app.sel_count = 6;
+        app.hide_selection();
+
+        assert_eq!(app.hidden_regions.len(), 1);
+        // While hidden, geometry is completely intact
+        let curr = app.current.as_ref().unwrap();
+        assert_eq!(curr.positions, orig_positions);
+        assert_eq!(curr.indices, orig_indices);
+
+        // Restore all
+        app.restore_all_hidden_regions();
+        assert!(app.hidden_regions.is_empty());
+
+        // After restore, geometry is STILL completely identical: 0 duplicate vertices, 0 holes
+        let curr_restored = app.current.as_ref().unwrap();
+        assert_eq!(curr_restored.positions, orig_positions);
+        assert_eq!(curr_restored.indices, orig_indices);
     }
 
     #[test]

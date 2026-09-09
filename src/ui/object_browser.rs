@@ -218,7 +218,7 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                         });
 
                         for hr in &app.hidden_regions {
-                            let tris = hr.mesh.triangle_count();
+                            let tris = hr.triangle_count();
                             let bg_color = if hr.visible {
                                 egui::Color32::from_rgba_unmultiplied(35, 45, 60, 60)
                             } else {
