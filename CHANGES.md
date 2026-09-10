@@ -13,7 +13,7 @@ it is called out below as an addition.
 | Hidden regions | Deleting one hidden region silently restored all others. | Remaining regions are re-indexed through the deletion and stay hidden. |
 | Transforms | Rotating / translating the mesh left the hole list, hole-fill preview and bridge preview at their old positions. | Holes (centroid, normal, bbox) and patch previews are transformed with the mesh; the camera target follows so the model stays framed. |
 | Camera | The `Z` view preset rendered the model upside down (up vector was -Y). | Presets derive a level horizon from the up axis. |
-| Camera | Orbit could flip over the poles and accumulate roll. | Turntable model with clamped elevation. |
+| Camera | Orbit accumulated roll. | Turntable model (yaw around the up axis, pitch around the camera's right vector): no roll, no pole clamp, the view can swing over the top and horizontal drags keep following the mouse while upside down. |
 | Camera | View preset transitions were abrupt (0.28 s). | 0.45 s ease-out transitions. |
 | Performance | The selection HUD ran the full bridge cluster detection (and rebuilt the mesh topology when it was not cached) every frame while anything was selected. | Cluster detection is cached per selection / mesh generation. |
 | Performance | Hover highlighting re-uploaded the whole per-vertex attribute buffer (16 bytes per vertex) on every mouse move. | Hover is drawn as an overlay; selection weights live in a separate 4-byte buffer; heat / group attributes are uploaded only when they change. |

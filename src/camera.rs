@@ -2,9 +2,9 @@
 //!
 //! The camera looks at `target` from a `distance` along its local +Z (`back`)
 //! axis. The orientation is stored as a quaternion so that callers can set it
-//! directly, but all interactive rotation goes through a turntable model
-//! (azimuth around the world up axis, clamped elevation) so the view never
-//! rolls and never flips over the poles.
+//! directly; interactive rotation is a turntable (yaw around the world up
+//! axis, pitch around the camera's own right vector) without a pole clamp:
+//! the view never rolls, and it can swing over the top and continue.
 
 use crate::mesh::Aabb;
 use glam::{Mat4, Quat, Vec3};
@@ -67,8 +67,6 @@ const ISO_BACK: [f32; 3] = [-0.8, 0.9, -0.8];
 
 /// Radians of rotation per dragged pixel.
 const ROTATE_SPEED: f32 = 0.008;
-/// Elevation is clamped just short of the poles so the azimuth stays defined.
-const MAX_ELEVATION: f32 = std::f32::consts::FRAC_PI_2 - 1e-4;
 
 /// In-flight smooth transition between two camera poses.
 #[derive(Clone, Copy, Debug)]
@@ -165,21 +163,6 @@ impl Camera {
         .normalize()
     }
 
-    /// Azimuth / elevation of the current orientation (roll is discarded).
-    fn decompose(&self) -> (f32, f32) {
-        let local = self.up_axis.base_rotation().inverse() * self.orient;
-        let back = (local * Vec3::Z).normalize_or_zero();
-        let elevation = back.y.clamp(-1.0, 1.0).asin();
-        let azimuth = if back.x.abs() + back.z.abs() > 1e-6 {
-            back.x.atan2(back.z)
-        } else {
-            // Exactly at a pole: derive the azimuth from the up vector instead.
-            let up = local * Vec3::Y;
-            (-up.x).atan2(-up.z)
-        };
-        (azimuth, elevation)
-    }
-
     /// Orientation looking from direction `back` (unit vector from target to
     /// eye) with the horizon kept level in the current up frame.
     fn orient_from_back(&self, back: Vec3) -> Quat {
@@ -209,13 +192,22 @@ impl Camera {
     // Interaction
     // ----------------------------------------------------------------------
 
-    /// Turntable rotation by a mouse delta (pixels).
+    /// Turntable rotation by a mouse delta (pixels): yaw around the world up
+    /// axis, pitch around the camera's right vector. There is no pole clamp,
+    /// so the view can pass over the top; the right vector stays horizontal,
+    /// so no roll accumulates. Once the view is upside down the yaw direction
+    /// is mirrored so a horizontal drag still follows the mouse.
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.transition = None;
-        let (az, el) = self.decompose();
-        let az = az - dx * ROTATE_SPEED;
-        let el = (el + dy * ROTATE_SPEED).clamp(-MAX_ELEVATION, MAX_ELEVATION);
-        self.orient = self.compose(az, el);
+        let world_up = self.up_axis.vector();
+        let upright = if self.up().dot(world_up) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let yaw = Quat::from_axis_angle(world_up, -dx * ROTATE_SPEED * upright);
+        let pitch = Quat::from_axis_angle(self.right(), dy * ROTATE_SPEED);
+        self.orient = (yaw * pitch * self.orient).normalize();
     }
 
     /// Turntable rotation around `pivot` (a world point, typically the point
@@ -474,17 +466,21 @@ mod tests {
     }
 
     #[test]
-    fn turntable_keeps_horizon_level_and_clamps_pitch() {
+    fn turntable_keeps_horizon_level_and_passes_over_the_pole() {
         let mut cam = Camera::default();
-        // Drag far past the pole: elevation must clamp, never flip.
-        cam.rotate(0.0, 10_000.0);
-        assert!(cam.up().y > 0.0, "camera must not flip upside down");
+        cam.set_view(ViewDir::Front);
+        let start_back = cam.back();
+        // A drag of 180 degrees goes over the top: the view is upside down
+        // and looks from the opposite side, with no pole clamp stopping it.
+        let half_turn = std::f32::consts::PI / ROTATE_SPEED;
+        cam.rotate(0.0, half_turn);
+        assert!(cam.up().y < -0.99, "view must be upside down after 180°");
         assert!(
-            cam.back().y > 0.99,
-            "camera should be looking straight down"
+            cam.back().dot(start_back) < -0.99,
+            "view must come from the opposite side"
         );
-        // Yaw only: the up vector keeps a positive world-Y component and the
-        // right vector stays horizontal (no roll).
+        // The right vector stays horizontal throughout (no roll), even while
+        // yawing upside down.
         cam.rotate(300.0, 0.0);
         assert!(
             cam.right().y.abs() < 1e-4,
@@ -494,6 +490,31 @@ mod tests {
             cam.rotate(37.0, -13.0);
         }
         assert!(cam.right().y.abs() < 1e-3, "no roll may accumulate");
+        // Another half turn brings the horizon back upright.
+        cam.set_view(ViewDir::Front);
+        cam.rotate(0.0, half_turn);
+        cam.rotate(0.0, half_turn);
+        assert!(cam.up().y > 0.99, "full turn ends upright");
+    }
+
+    #[test]
+    fn yaw_follows_the_mouse_when_upside_down() {
+        // Dragging right must always move the eye towards the camera's own
+        // left (the scene turns with the mouse), upright or upside down.
+        let mut cam = Camera::default();
+        cam.set_view(ViewDir::Front);
+        cam.rotate(100.0, 0.0);
+        assert!(
+            cam.back().dot(cam.right()) < -0.5,
+            "upright: eye moves to -right"
+        );
+        cam.set_view(ViewDir::Front);
+        cam.rotate(0.0, std::f32::consts::PI / ROTATE_SPEED);
+        cam.rotate(100.0, 0.0);
+        assert!(
+            cam.back().dot(cam.right()) < -0.5,
+            "flipped: eye moves to -right"
+        );
     }
 
     #[test]
