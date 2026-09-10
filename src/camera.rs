@@ -503,16 +503,18 @@ mod tests {
         // left (the scene turns with the mouse), upright or upside down.
         let mut cam = Camera::default();
         cam.set_view(ViewDir::Front);
+        let (back0, right0) = (cam.back(), cam.right());
         cam.rotate(100.0, 0.0);
         assert!(
-            cam.back().dot(cam.right()) < -0.5,
+            (cam.back() - back0).dot(right0) < -0.5,
             "upright: eye moves to -right"
         );
         cam.set_view(ViewDir::Front);
         cam.rotate(0.0, std::f32::consts::PI / ROTATE_SPEED);
+        let (back0, right0) = (cam.back(), cam.right());
         cam.rotate(100.0, 0.0);
         assert!(
-            cam.back().dot(cam.right()) < -0.5,
+            (cam.back() - back0).dot(right0) < -0.5,
             "flipped: eye moves to -right"
         );
     }
