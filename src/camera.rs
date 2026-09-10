@@ -342,7 +342,7 @@ impl Camera {
             from_distance: self.distance,
             to_distance: distance,
             start: now,
-            duration: 0.28,
+            duration: 0.45,
         });
     }
 

@@ -381,7 +381,8 @@ fn sync_scene(
     if let Ok((mut camera, mut transform, mut projection)) = cameras.single_mut() {
         camera.clear_color = ClearColorConfig::Custom(bg_color());
         if let Some(window) = window.as_deref() {
-            let scale = window.scale_factor();
+            // egui points to physical pixels (includes the interface zoom).
+            let scale = frame.pixels_per_point;
             let r = frame.viewport_rect;
             let win = window.physical_size();
             if win.x > 0 && win.y > 0 && r.width() > 0.0 && r.height() > 0.0 {

@@ -5,6 +5,7 @@
 mod app;
 mod camera;
 mod decimate;
+mod demo;
 mod export;
 mod geom;
 mod io;
@@ -42,13 +43,49 @@ fn main() -> bevy::app::AppExit {
         }
         args.remove(i);
     }
+    // `--demo <out.mp4> <part> <scan> <large>`: record the scripted demo.
+    let mut demo = None;
+    if let Some(i) = args.iter().position(|a| a == "--demo") {
+        let rest: Vec<std::path::PathBuf> = args
+            .drain(i..)
+            .skip(1)
+            .map(std::path::PathBuf::from)
+            .collect();
+        match rest.as_slice() {
+            [out, part, scan, large, ..] => {
+                demo = Some(demo::DemoPlugin {
+                    output: out.clone(),
+                    assets: demo::DemoAssets {
+                        part: part.clone(),
+                        scan: scan.clone(),
+                        large: large.clone(),
+                    },
+                });
+            }
+            _ => {
+                eprintln!("usage: ScanImprover --demo <out.mp4> <part.stl> <scan.obj> <large.stl>");
+                return bevy::app::AppExit::error();
+            }
+        }
+    }
     let mut scan_app = ScanApp::new();
+    if demo.is_some() {
+        // Deterministic look regardless of the user's saved settings.
+        scan_app.apply_settings(&settings::Settings::default());
+        scan_app.demo = Some(demo::DemoOverlay::default());
+    }
     if let Some(arg) = args.first() {
         let path = std::path::PathBuf::from(arg);
         if path.exists() {
             scan_app.load_file(path);
         }
     }
+    // The demo records the whole screen; the normal window starts maximized.
+    let window_mode = if demo.is_some() {
+        bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
+    } else {
+        bevy::window::WindowMode::Windowed
+    };
 
     let mut app = App::new();
     app.add_plugins(
@@ -57,6 +94,7 @@ fn main() -> bevy::app::AppExit {
                 primary_window: Some(Window {
                     title: "ScanImprover".to_string(),
                     resolution: bevy::window::WindowResolution::new(1500, 950),
+                    mode: window_mode,
                     ..default()
                 }),
                 ..default()
@@ -68,9 +106,18 @@ fn main() -> bevy::app::AppExit {
     .insert_resource(scan_app)
     .add_systems(EguiPrimaryContextPass, ui_system)
     .add_systems(Last, save_settings_on_exit);
+    if demo.is_none() {
+        app.add_systems(Startup, maximize_window);
+        // Render only on input, window events and egui repaint requests
+        // (animations, worker results) instead of continuously.
+        app.insert_resource(bevy::winit::WinitSettings::desktop_app());
+    }
     if let Some(path) = screenshot {
         app.insert_resource(ScreenshotRequest { path, frames: 0 })
             .add_systems(Update, screenshot_system);
+    }
+    if let Some(plugin) = demo {
+        app.add_plugins(plugin);
     }
     app.run()
 }
@@ -87,8 +134,13 @@ fn ui_system(
     Ok(())
 }
 
+/// Starts with the window filling the screen.
+fn maximize_window(mut window: Single<&mut Window, With<PrimaryWindow>>) {
+    window.set_maximized(true);
+}
+
 fn save_settings_on_exit(mut exit: MessageReader<AppExit>, scan: Res<ScanApp>) {
-    if exit.read().next().is_some() {
+    if exit.read().next().is_some() && scan.demo.is_none() {
         scan.save_settings();
     }
 }

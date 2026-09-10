@@ -150,6 +150,8 @@ pub(crate) struct SymState {
 pub(crate) struct FrameOutput {
     /// Central panel rectangle in logical points.
     pub(crate) viewport_rect: egui::Rect,
+    /// Physical pixels per egui point (display scale times interface zoom).
+    pub(crate) pixels_per_point: f32,
     pub(crate) depth_lines: Vec<overlay::Line>,
     pub(crate) overlay_lines: Vec<overlay::Line>,
     pub(crate) fills: Vec<overlay::Line>,
@@ -161,6 +163,7 @@ impl Default for FrameOutput {
     fn default() -> Self {
         FrameOutput {
             viewport_rect: egui::Rect::ZERO,
+            pixels_per_point: 1.0,
             depth_lines: Vec::new(),
             overlay_lines: Vec::new(),
             fills: Vec::new(),
@@ -331,6 +334,8 @@ pub struct App {
     pub(crate) orbit_pivot: Option<Vec3>,
     /// Depth (distance from the eye) of the point grabbed by the current pan.
     pub(crate) pan_depth: Option<f32>,
+    /// Cursor / caption overlay while a scripted demo is recorded.
+    pub(crate) demo: Option<crate::demo::DemoOverlay>,
 }
 
 impl App {
@@ -457,15 +462,10 @@ impl App {
             stroke_snapshot_pending: false,
             orbit_pivot: None,
             pan_depth: None,
+            demo: None,
         };
         if !cfg!(test) {
             app.apply_settings(&crate::settings::Settings::load());
-        }
-        if let Some(arg) = std::env::args().nth(1) {
-            let path = PathBuf::from(arg);
-            if path.exists() {
-                app.load_file(path);
-            }
         }
         app
     }
@@ -694,6 +694,7 @@ impl App {
         if self.camera.is_animating() {
             ctx.request_repaint();
         }
+        crate::demo::draw_overlay(self, ctx);
     }
 
     pub(crate) fn save_settings(&self) {

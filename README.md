@@ -41,7 +41,7 @@ When working with 3D scan data for reverse engineering in CAD software, two majo
 ## ✨ Key Features
 
 - **Blazing Fast Native Performance:** Built with Rust, the [Bevy](https://bevy.org) engine (wgpu based) for the 3D viewport, `egui` for the interface, and multi-threaded processing via `rayon`. Every long operation (loading, decimation, analysis, repair, segmentation, export) runs on worker threads with a live activity feed — the UI never blocks.
-- **Light & Dark Themes:** WCAG AA conformant palettes; panel sizes, theme and view settings are remembered between runs.
+- **Light & Dark Themes:** WCAG AA conformant palettes with the Noto Sans interface font; panel sizes, theme and view settings are remembered between runs. The window renders only when something changes, so an idle app does not drain the battery.
 - **Modern CAD Viewport:** 4x anti-aliased rendering, ground grid, navigation gizmo, turntable orbit camera that rotates around the point under the cursor, zoom-to-cursor, exact panning, animated view presets and a selectable up axis (Y or Z).
 - **Mesh Decimation:** Fast, high-quality simplification (meshoptimizer) to bring multi-million triangle meshes down to lightweight CAD-friendly sizes, with measured deviation and a heatmap.
 - **Interactive Primitive Fitting & Alignment:**
@@ -128,6 +128,14 @@ Click an axis on the navigation gizmo (bottom right of the viewport) to look alo
 | `src/worker.rs` | Worker thread pool with progress reporting |
 
 Run the tests with `cargo test`. `cargo run -- model.stl --screenshot out.png` renders a few frames, saves the window to `out.png` and exits (used for automated visual checks). A list of all fixes and improvements of the 2026 refactoring pass is in `CHANGES.md`.
+
+### Demo video
+
+```bash
+cargo run -- --demo demo.mp4 part.stl scan.obj large.stl
+```
+
+records a scripted tour of the features (`src/demo.rs`) in fullscreen at 30 fps and encodes it with `ffmpeg` (must be on the `PATH`). The three meshes are a CAD-like part (face groups, plane fit, alignment, symmetry), a scan with holes (repair) and a dense mesh (decimation). Mouse and keyboard are ignored while it records.
 
 ---
 

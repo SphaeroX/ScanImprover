@@ -14,6 +14,7 @@ it is called out below as an addition.
 | Transforms | Rotating / translating the mesh left the hole list, hole-fill preview and bridge preview at their old positions. | Holes (centroid, normal, bbox) and patch previews are transformed with the mesh; the camera target follows so the model stays framed. |
 | Camera | The `Z` view preset rendered the model upside down (up vector was -Y). | Presets derive a level horizon from the up axis. |
 | Camera | Orbit could flip over the poles and accumulate roll. | Turntable model with clamped elevation. |
+| Camera | View preset transitions were abrupt (0.28 s). | 0.45 s ease-out transitions. |
 | Performance | The selection HUD ran the full bridge cluster detection (and rebuilt the mesh topology when it was not cached) every frame while anything was selected. | Cluster detection is cached per selection / mesh generation. |
 | Performance | Hover highlighting re-uploaded the whole per-vertex attribute buffer (16 bytes per vertex) on every mouse move. | Hover is drawn as an overlay; selection weights live in a separate 4-byte buffer; heat / group attributes are uploaded only when they change. |
 | Performance | Toggling a hidden region re-uploaded the full vertex buffer. | Vertex buffer is reused when only visibility changed (mesh generation counter). |
@@ -59,10 +60,14 @@ it is called out below as an addition.
 - Face-group / heat / selection coloring moved from the shader to per-vertex colors computed on the CPU (`App::vertex_colors`).
 - `--screenshot <file.png>` renders a few frames to a file and exits, for automated visual checks.
 - Dependencies are built optimised in debug profiles (`[profile.dev.package."*"] opt-level = 3`) so the debug build stays interactive.
+- Rendering is reactive (`WinitSettings::desktop_app`): frames are drawn on input, window events and egui repaint requests (animations, worker results) instead of continuously, which keeps an idle app at near-zero GPU / battery use.
+- The window starts maximized. The camera viewport is derived from egui's pixels-per-point (display scale times interface zoom), so the scene always fills the viewport.
+- `--demo <out.mp4> <part> <scan> <large>` (`src/demo.rs`) records a scripted feature tour: synthetic pointer / keyboard input on a fixed 30 fps clock, cursor and captions drawn over the interface, every frame streamed to `ffmpeg`.
 
 ## Rendering and design
 
 - 4x MSAA, themed background, ground grid with major lines and colored axes.
+- Interface font: Noto Sans (regular for text, semibold for section titles and captions, Noto Sans Symbols as fallback), bundled under `assets/fonts` (SIL Open Font License).
 - WCAG 2.1 AA conformant dark and light palettes (every text token reaches 4.5:1 on every surface; enforced by `ui::theme::tests::palettes_are_wcag_aa_conformant`), switchable in the toolbar.
 - Flat panel layout: captions instead of nested boxes, faint borders, several tool sections can be open at once.
 - Crease-split normals, wireframe edge extraction and overlay mesh builders are unit tested.

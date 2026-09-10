@@ -6,7 +6,80 @@
 //! of at least 4.5:1 (WCAG 2.1 AA for normal text); a unit test enforces it.
 
 use egui::{Color32, CornerRadius, Margin, Stroke};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Font family for titles and captions (Noto Sans SemiBold).
+pub const SEMIBOLD: &str = "semibold";
+
+/// Noto Sans as the interface font (with Noto Sans Symbols as fallback and
+/// egui's default fonts after that), plus a semibold family for titles.
+/// Fonts are bundled from `assets/fonts` (SIL Open Font License).
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let data = |bytes: &'static [u8]| Arc::new(egui::FontData::from_static(bytes));
+    fonts.font_data.insert(
+        "noto_sans".to_owned(),
+        data(include_bytes!("../../assets/fonts/NotoSans-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "noto_sans_semibold".to_owned(),
+        data(include_bytes!("../../assets/fonts/NotoSans-SemiBold.ttf")),
+    );
+    fonts.font_data.insert(
+        "noto_sans_symbols".to_owned(),
+        data(include_bytes!(
+            "../../assets/fonts/NotoSansSymbols-Regular.ttf"
+        )),
+    );
+    let proportional = fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    proportional.insert(0, "noto_sans".to_owned());
+    proportional.insert(1, "noto_sans_symbols".to_owned());
+    let mut semibold = proportional.clone();
+    semibold[0] = "noto_sans_semibold".to_owned();
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(SEMIBOLD.into()), semibold);
+    ctx.set_fonts(fonts);
+}
+
+/// Font installation state: 0 = not yet, 1 = requested this pass (egui
+/// applies new fonts at the next pass), 2 = live.
+const FONT_STATE_ID: &str = "scanimprover-fonts";
+
+fn ensure_fonts(ctx: &egui::Context) {
+    let id = egui::Id::new(FONT_STATE_ID);
+    match ctx.data(|d| d.get_temp::<u8>(id)).unwrap_or(0) {
+        0 => {
+            install_fonts(ctx);
+            ctx.data_mut(|d| d.insert_temp(id, 1u8));
+            ctx.request_repaint();
+        }
+        1 => {
+            ctx.data_mut(|d| d.insert_temp(id, 2u8));
+        }
+        _ => {}
+    }
+}
+
+/// Family for titles and captions: semibold once the bundled fonts are live,
+/// the default proportional family before that.
+pub fn title_family(ctx: &egui::Context) -> egui::FontFamily {
+    let live = ctx.data(|d| d.get_temp::<u8>(egui::Id::new(FONT_STATE_ID))) == Some(2);
+    if live {
+        egui::FontFamily::Name(SEMIBOLD.into())
+    } else {
+        egui::FontFamily::Proportional
+    }
+}
+
+/// Font id in the title family.
+pub fn semibold(ctx: &egui::Context, size: f32) -> egui::FontId {
+    egui::FontId::new(size, title_family(ctx))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -148,6 +221,7 @@ pub fn viewport_gradient() -> ([f32; 3], [f32; 3]) {
 /// Applies `mode` to the context when it differs from the active theme (or
 /// on the first call).
 pub fn sync(ctx: &egui::Context, mode: ThemeMode) {
+    ensure_fonts(ctx);
     let id = egui::Id::new("scanimprover-theme-applied");
     let applied = ctx.data(|d| d.get_temp::<ThemeMode>(id));
     if applied == Some(mode) {
@@ -293,6 +367,7 @@ pub fn floating_frame() -> egui::Frame {
 pub fn caption(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text.to_uppercase())
+            .family(title_family(ui.ctx()))
             .size(10.5)
             .strong()
             .color(pal().text_muted),

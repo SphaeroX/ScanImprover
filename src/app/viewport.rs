@@ -62,7 +62,7 @@ impl App {
 
         self.draw_brush_cursor(ui, &response, is_navigating);
         let (depth_lines, overlay_lines, fills) = self.build_overlays(hover_pos_3d, is_navigating);
-        self.collect_frame(rect, depth_lines, overlay_lines, fills);
+        self.collect_frame(ui.ctx(), rect, depth_lines, overlay_lines, fills);
 
         self.draw_viewport_chrome(ui, rect);
         crate::ui::selection_hud::render_selection_hud(self, ui, rect);
@@ -640,6 +640,7 @@ impl App {
 
     fn collect_frame(
         &mut self,
+        ctx: &egui::Context,
         rect: egui::Rect,
         depth_lines: Vec<Line>,
         overlay_lines: Vec<Line>,
@@ -651,6 +652,7 @@ impl App {
         self.camera.update_clip_planes(&scene, extra);
         self.frame = super::FrameOutput {
             viewport_rect: rect,
+            pixels_per_point: ctx.pixels_per_point(),
             depth_lines,
             overlay_lines,
             fills,

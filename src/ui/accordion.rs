@@ -65,6 +65,7 @@ pub fn accordion_header(
         ui.add(
             egui::Label::new(
                 egui::RichText::new(title)
+                    .family(theme::title_family(ui.ctx()))
                     .strong()
                     .size(13.0)
                     .color(text_color),
