@@ -769,10 +769,25 @@ pub fn render_face_groups(app: &mut App, ui: &mut egui::Ui) {
         if tol_resp.changed() {
             app.group_fit_tol = tol_pct / 100.0;
         }
+        let mut feature_pct = app.group_feature_frac * 100.0;
+        let feature_resp = ui
+            .add(
+                egui::Slider::new(&mut feature_pct, 0.0..=15.0)
+                    .text("Feature size")
+                    .suffix("% of size"),
+            )
+            .on_hover_text(
+                "Surfaces that bend by more than the crease angle within this distance \
+                 (fillets, small features) separate the groups. 0 = compare neighbouring \
+                 faces only.",
+            );
+        if feature_resp.changed() {
+            app.group_feature_frac = feature_pct / 100.0;
+        }
         // Re-run live while dragging (small meshes) or on slider release (big meshes).
         let rerun =
             |resp: &egui::Response| has_groups && resp.changed() && (live || resp.drag_stopped());
-        if rerun(&angle_resp) || rerun(&min_resp) || rerun(&tol_resp) {
+        if rerun(&angle_resp) || rerun(&min_resp) || rerun(&tol_resp) || rerun(&feature_resp) {
             run_detect = true;
         }
         ui.horizontal(|ui| {

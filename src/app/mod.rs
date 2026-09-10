@@ -196,6 +196,8 @@ pub struct App {
     pub(crate) bbox: Aabb,
     /// Incremented whenever the displayed mesh object changes.
     pub(crate) mesh_generation: u64,
+    /// Bumped whenever `group_ids` changes (render mesh split by group).
+    pub(crate) groups_generation: u64,
 
     // --- Selection ----------------------------------------------------------
     pub(crate) sel: Arc<Vec<u8>>,
@@ -277,6 +279,10 @@ pub struct App {
     pub(crate) group_angle_deg: f32,
     pub(crate) group_min_tris: f32,
     pub(crate) group_fit_tol: f32,
+    /// Feature size for crease detection as a fraction of the bbox diagonal:
+    /// surfaces that bend by more than the crease angle within this distance
+    /// (fillets, small features) separate the groups.
+    pub(crate) group_feature_frac: f32,
     pub(crate) groups_filter: GroupFilter,
     pub(crate) selected_group: Option<i32>,
     pub(crate) hover_group: Option<i32>,
@@ -354,6 +360,7 @@ impl App {
                 max: Vec3::ZERO,
             },
             mesh_generation: 0,
+            groups_generation: 0,
             sel: Arc::new(Vec::new()),
             sel_count: 0,
             sel_generation: 0,
@@ -416,6 +423,7 @@ impl App {
             group_angle_deg: 45.0,
             group_min_tris: 2.0,
             group_fit_tol: 0.0015,
+            group_feature_frac: 0.04,
             groups_filter: GroupFilter::All,
             selected_group: None,
             hover_group: None,

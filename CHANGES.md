@@ -76,6 +76,8 @@ it is called out below as an addition.
 
 - BVH: binned SAH build (parallel for large subtrees), near-first traversal, flat node layout. Closest-point and ray queries are roughly twice as fast; the test suite went from 21 s to 11 s.
 - STL: parallel binary parsing and writing; welding uses a parallel sort while keeping the original vertex numbering.
+- Segmentation (face groups): rewritten for scans. Normals are smoothed over a quarter of a *feature size* (new slider, default 4 % of the model size, never across creases); a face is a crease face when most of the rim of its feature-size neighbourhood bends away by more than half the crease angle, so fillets and small features separate surfaces while noise and gentle waviness do not; detection runs at three scales so narrow features (ribs, rims) get their own region; crease bands are given back to the region whose anchor plane they lie on; regions split by an absorbed band are reunited; tiny noise islands join their neighbours. On coarse CAD meshes this reduces to the classic crease-angle growing. Plane classification uses trimmed statistics (best 95 % of the points) and the cylinder test tolerates noisy normals. The old neighbour-to-neighbour crease test put an entire scan into one group (median dihedral 2.5°).
+- Face group colors are exact per face: the render mesh is split along group boundaries instead of blending colors at shared vertices (which produced gray speckle on thin groups).
 - Segmentation: primitive classification of regions runs in parallel.
 - Circle / cylinder fitting: axis candidate scoring runs in parallel.
 - Hole filling: Liepa-style edge flipping after refinement improves triangle quality (minimum angle) before fairing; loop edges are never flipped and orientation is preserved.

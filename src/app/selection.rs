@@ -9,9 +9,6 @@ use glam::{Quat, Vec3};
 use rayon::prelude::*;
 use std::sync::Arc;
 
-/// Default per-vertex attribute: no heat, ungrouped.
-const ATTR_DEFAULT: [f32; 4] = [0.0, -1.0, -1.0, 0.0];
-
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * t,
@@ -402,6 +399,15 @@ impl App {
         self.group_ids.clear();
         self.selected_group = None;
         self.hover_group = None;
+        self.mark_groups_changed();
+    }
+
+    /// The per-face group map changed: the render mesh is split along group
+    /// boundaries, so it has to be rebuilt.
+    pub(crate) fn mark_groups_changed(&mut self) {
+        self.groups_generation += 1;
+        self.mesh_dirty = true;
+        self.aux_dirty = true;
     }
 
     pub(crate) fn detect_face_groups(&mut self) {
@@ -418,6 +424,7 @@ impl App {
             self.group_angle_deg,
             min_tris,
             self.group_fit_tol,
+            self.group_feature_frac,
         );
         self.install_face_groups(groups, ids);
     }
@@ -455,7 +462,7 @@ impl App {
         self.face_groups = groups;
         self.group_ids = ids;
         self.groups_show = true;
-        self.aux_dirty = true;
+        self.mark_groups_changed();
     }
 
     pub(crate) fn clear_face_groups(&mut self) {
@@ -608,97 +615,69 @@ impl App {
         };
     }
 
-    /// Per-vertex GPU attributes: deviation heat and face-group color codes.
-    pub(crate) fn build_vertex_attributes(&self) -> Option<Vec<[f32; 4]>> {
-        let m = self.display()?;
-        let nv = m.vertex_count();
-        let mut attr = vec![ATTR_DEFAULT; nv];
-        if let Some(heat) = &self.heat
-            && heat.len() == nv
-            && self.heat_on
-        {
-            for (a, h) in attr.iter_mut().zip(heat.iter()) {
-                a[0] = *h;
-            }
+    /// Color of a face group in the current coloring mode, `None` when the
+    /// group is filtered out.
+    fn group_color(&self, gid: i32) -> Option<[f32; 3]> {
+        let g = self.face_groups.get(usize::try_from(gid).ok()?)?;
+        if !group_matches_filter(g.kind, self.groups_filter) {
+            return None;
         }
-        if self.groups_show
-            && !self.face_groups.is_empty()
-            && self.group_ids.len() == m.triangle_count()
-        {
-            let by_type = self.groups_by_type;
-            let filter = self.groups_filter;
-            // -1 = no group yet, -2 = boundary between two groups.
-            let mut vgid = vec![-1i32; nv];
-            for t in 0..m.triangle_count() {
-                let g = self.group_ids[t];
-                if g < 0 {
-                    continue;
-                }
-                for k in 0..3 {
-                    let v = m.indices[3 * t + k] as usize;
-                    match vgid[v] {
-                        -1 => vgid[v] = g,
-                        cur if cur == g => {}
-                        _ => vgid[v] = -2,
-                    }
-                }
-            }
-            for (v, a) in attr.iter_mut().enumerate() {
-                let vg = vgid[v];
-                if vg >= 0 {
-                    let kind = self.face_groups[vg as usize].kind;
-                    if group_matches_filter(kind, filter) {
-                        a[1] = if by_type {
-                            -(3.0 + kind as i32 as f32)
-                        } else {
-                            vg as f32
-                        };
-                        a[2] = vg as f32;
-                    }
-                } else if vg == -2 {
-                    a[1] = -2.0;
-                    a[2] = -1.0;
-                }
-            }
-        }
-        Some(attr)
+        Some(if self.groups_by_type {
+            crate::geom::segment::KIND_COLORS[g.kind as usize]
+        } else {
+            crate::geom::segment::group_hue_color(gid)
+        })
     }
 
-    /// Final per-vertex colors (linear RGBA) combining the base color, face
-    /// group coloring, deviation heat, hovered group and selection tint.
-    pub(crate) fn vertex_colors(&self) -> Vec<[f32; 4]> {
+    /// Final colors (linear RGBA) per render vertex: base color, face group
+    /// color of the vertex's triangle, deviation heat, hovered group and
+    /// selection tint. `render_to_mesh` / `render_to_face` map each render
+    /// vertex to its mesh vertex and one of its triangles.
+    pub(crate) fn vertex_colors(
+        &self,
+        render_to_mesh: &[u32],
+        render_to_face: &[u32],
+    ) -> Vec<[f32; 4]> {
         let base = [0.74f32, 0.76, 0.80];
-        let Some(attr) = self.build_vertex_attributes() else {
+        let Some(m) = self.display() else {
             return Vec::new();
         };
+        let nv = m.vertex_count();
+        let nt = m.triangle_count();
         let sel = self.build_vertex_selection().unwrap_or_default();
-        let groups_on = self.groups_show
-            && !self.face_groups.is_empty()
-            && self
-                .display()
-                .is_some_and(|m| self.group_ids.len() == m.triangle_count());
-        let heat_on = self.heat_on && self.heat.is_some() && self.heat_max > 0.0;
-        let heat_scale = if heat_on { 1.0 / self.heat_max } else { 0.0 };
+        let groups_on =
+            self.groups_show && !self.face_groups.is_empty() && self.group_ids.len() == nt;
+        let heat = self
+            .heat
+            .as_deref()
+            .filter(|h| self.heat_on && h.len() == nv && self.heat_max > 0.0);
+        let heat_scale = 1.0 / self.heat_max.max(1e-9);
         let hover = self.hover_group;
-        attr.par_iter()
-            .zip(sel.par_iter())
-            .map(|(a, &s)| {
+        render_to_mesh
+            .par_iter()
+            .zip(render_to_face.par_iter())
+            .map(|(&mv, &face)| {
+                let mv = mv as usize;
+                let gid = if groups_on && (face as usize) < nt {
+                    self.group_ids[face as usize]
+                } else {
+                    -1
+                };
                 let mut col = base;
-                if groups_on && a[1] >= 0.0 {
-                    col = crate::geom::segment::group_hue_color(a[1] as i32);
-                } else if groups_on && a[1] <= -3.0 {
-                    let kind = ((-a[1]) as i32 - 3).clamp(0, 3) as usize;
-                    col = crate::geom::segment::KIND_COLORS[kind];
-                } else if groups_on && a[1] <= -2.5 {
-                    col = [0.16, 0.17, 0.21];
+                if gid >= 0
+                    && let Some(c) = self.group_color(gid)
+                {
+                    col = c;
                 }
-                if heat_on && a[0] >= 0.0 {
-                    col = heat_color((a[0] * heat_scale).clamp(0.0, 1.0));
+                if let Some(h) = heat
+                    && h[mv] >= 0.0
+                {
+                    col = heat_color((h[mv] * heat_scale).clamp(0.0, 1.0));
                 }
-                if groups_on && hover.is_some_and(|h| (a[2] - h as f32).abs() < 0.5) {
+                if gid >= 0 && hover == Some(gid) {
                     col = mix(col, [1.0, 1.0, 1.0], 0.45);
                 }
-                if s > 0.75 {
+                if sel.get(mv).is_some_and(|&s| s > 0.75) {
                     col = mix(col, [1.0, 0.45, 0.10], 0.55);
                 }
                 crate::render::srgb_to_linear([col[0], col[1], col[2], 1.0])

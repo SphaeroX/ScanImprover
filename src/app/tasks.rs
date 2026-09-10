@@ -110,6 +110,7 @@ impl App {
         let angle = self.group_angle_deg;
         let min_tris = self.group_min_tris.round().max(1.0) as usize;
         let tol = self.group_fit_tol;
+        let feature = self.group_feature_frac;
         self.status = "Detecting face groups…".to_string();
         self.groups_job = Some(self.worker.submit_task("Face groups", move |p| {
             let topo = match topo {
@@ -120,7 +121,7 @@ impl App {
                 }
             };
             p.set(None, "segmenting");
-            let (groups, ids) = segment_faces(&mesh, &topo, angle, min_tris, tol);
+            let (groups, ids) = segment_faces(&mesh, &topo, angle, min_tris, tol, feature);
             TaskOutput::FaceGroups { groups, ids }
         }));
     }

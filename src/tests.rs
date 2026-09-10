@@ -1390,7 +1390,7 @@ mod tests {
 
         let m = box_mesh(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
         let topo = MeshTopology::build(&m);
-        let (groups, ids) = segment_faces(&m, &topo, 45.0, 1, 0.0015);
+        let (groups, ids) = segment_faces(&m, &topo, 45.0, 1, 0.0015, 0.04);
         assert_eq!(groups.len(), 6, "each box face must be its own group");
         assert!(ids.iter().all(|&g| g >= 0), "every face must be grouped");
         assert!(groups.iter().all(|g| g.kind == GroupKind::Plane));
@@ -1404,7 +1404,7 @@ mod tests {
 
         let m = cylinder_wall_mesh(10.0, 40.0, 6, 32);
         let topo = MeshTopology::build(&m);
-        let (groups, ids) = segment_faces(&m, &topo, 45.0, 4, 0.0015);
+        let (groups, ids) = segment_faces(&m, &topo, 45.0, 4, 0.0015, 0.04);
         assert_eq!(groups.len(), 1, "cylinder wall must be a single group");
         assert_eq!(groups[0].kind, GroupKind::Cylinder);
         assert!(
@@ -1423,7 +1423,7 @@ mod tests {
 
         let m = sphere_mesh(5.0, 24, 48);
         let topo = MeshTopology::build(&m);
-        let (groups, _) = segment_faces(&m, &topo, 60.0, 4, 0.0015);
+        let (groups, _) = segment_faces(&m, &topo, 60.0, 4, 0.0015, 0.04);
         assert!(
             groups.len() <= 3,
             "sphere should form one main group, got {}",
@@ -1432,6 +1432,103 @@ mod tests {
         let big = groups.iter().max_by_key(|g| g.tris.len()).unwrap();
         assert_eq!(big.kind, GroupKind::Sphere);
         assert!((big.radius - 5.0).abs() < 0.05, "radius {}", big.radius);
+    }
+
+    /// Two planes joined by a fillet, finely tessellated like a scan and
+    /// with vertex noise: an L-profile (y = 0 for x <= 0, quarter round of
+    /// radius `fillet`, then x = fillet for y >= fillet) extruded along z.
+    fn filleted_step_mesh(fillet: f32, step: f32, noise: f32) -> Mesh {
+        let mut rng = crate::rng::Rng::new(7);
+        let mut profile: Vec<(f32, f32, glam::Vec2)> = Vec::new();
+        let mut x = -20.0f32;
+        while x < 0.0 {
+            profile.push((x, 0.0, glam::Vec2::Y));
+            x += step;
+        }
+        let arc = std::f32::consts::FRAC_PI_2 * fillet;
+        let steps = (arc / step).ceil().max(2.0) as usize;
+        for i in 0..=steps {
+            let a = std::f32::consts::FRAC_PI_2 * i as f32 / steps as f32;
+            // centre of the round is at (0, fillet)
+            profile.push((
+                fillet * a.sin(),
+                fillet - fillet * a.cos(),
+                glam::Vec2::new(a.sin(), a.cos()),
+            ));
+        }
+        let mut y = fillet + step;
+        while y < fillet + 20.0 {
+            profile.push((fillet, y, glam::Vec2::X));
+            y += step;
+        }
+        let depth_steps = (20.0 / step).ceil() as usize;
+        let mut v = Vec::new();
+        for (px, py, n) in &profile {
+            for k in 0..=depth_steps {
+                let z = 20.0 * k as f32 / depth_steps as f32;
+                let d = (rng.f32() * 2.0 - 1.0) * noise;
+                v.push([px + n.x * d, py + n.y * d, z]);
+            }
+        }
+        let cols = depth_steps + 1;
+        let mut idx = Vec::new();
+        for i in 0..profile.len() - 1 {
+            for k in 0..depth_steps {
+                let a = (i * cols + k) as u32;
+                let b = (i * cols + k + 1) as u32;
+                let c = ((i + 1) * cols + k) as u32;
+                let d = ((i + 1) * cols + k + 1) as u32;
+                idx.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        Mesh::from_indexed(v, idx)
+    }
+
+    #[test]
+    fn face_groups_scan_fillet_separates_planes() {
+        use crate::geom::segment::{GroupKind, segment_faces};
+        use crate::geom::topology::MeshTopology;
+
+        // Fillet radius 2 on a ~35 mm part, 0.25 mm triangles, 0.03 mm noise
+        // (about 15 degrees of normal jitter between neighbours).
+        let m = filleted_step_mesh(2.0, 0.25, 0.03);
+        let topo = MeshTopology::build(&m);
+        let (groups, ids) = segment_faces(&m, &topo, 45.0, 50, 0.003, 0.04);
+        let planes: Vec<_> = groups
+            .iter()
+            .filter(|g| g.kind == GroupKind::Plane)
+            .collect();
+        assert!(
+            planes.len() >= 2,
+            "expected the two flat faces as plane groups, got {:?}",
+            groups
+                .iter()
+                .map(|g| (g.kind, g.tris.len()))
+                .collect::<Vec<_>>()
+        );
+        let has = |n: Vec3| planes.iter().any(|g| g.normal.dot(n).abs() > 0.98);
+        assert!(has(Vec3::Y), "horizontal plane missing");
+        assert!(has(Vec3::X), "vertical plane missing");
+        let largest = groups.iter().max_by_key(|g| g.tris.len()).unwrap();
+        assert_eq!(largest.kind, GroupKind::Plane, "largest group must be flat");
+        // The fillet must not be swallowed by a plane: each plane stays below
+        // its own share plus a thin band.
+        let nt = m.triangle_count();
+        assert!(planes.iter().all(|g| g.tris.len() < nt * 55 / 100));
+        assert!(ids.iter().filter(|&&g| g >= 0).count() > nt * 80 / 100);
+    }
+
+    #[test]
+    fn face_groups_feature_size_zero_is_classic_growing() {
+        use crate::geom::segment::segment_faces;
+        use crate::geom::topology::MeshTopology;
+
+        // Without a feature size the smooth fillet merges everything into one
+        // region, as the plain crease-angle criterion would.
+        let m = filleted_step_mesh(2.0, 0.25, 0.0);
+        let topo = MeshTopology::build(&m);
+        let (groups, _) = segment_faces(&m, &topo, 45.0, 1, 0.003, 0.0);
+        assert_eq!(groups.len(), 1);
     }
 
     #[test]
@@ -2690,5 +2787,73 @@ mod tests {
             orig_tris,
             "Undo must restore original triangle count"
         );
+    }
+}
+
+#[cfg(test)]
+mod segment_debug {
+    /// `SCAN_STL=path cargo test segment_debug -- --ignored --nocapture`
+    /// prints the face groups of a real scan with their fit residuals.
+    #[test]
+    #[ignore]
+    fn print_groups_of_scan() {
+        use crate::geom::fitting::fit_plane;
+        use crate::geom::segment::segment_faces;
+        use crate::geom::topology::MeshTopology;
+        let Ok(path) = std::env::var("SCAN_STL") else {
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read");
+        let mesh = crate::io::load_any(std::path::Path::new(&path), &bytes).expect("load");
+        let topo = MeshTopology::build(&mesh);
+        let diag = mesh.bbox().diagonal();
+        let t0 = std::time::Instant::now();
+        let angle: f32 = std::env::var("SEG_ANGLE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(45.0);
+        let (groups, ids) = segment_faces(&mesh, &topo, angle, 2, 0.0015, 0.04);
+        println!(
+            "tris {} diag {diag:.2} groups {} ungrouped {} in {:?}",
+            mesh.triangle_count(),
+            groups.len(),
+            ids.iter().filter(|&&g| g < 0).count(),
+            t0.elapsed()
+        );
+        for g in groups.iter().take(40) {
+            let pts: Vec<[f32; 3]> = g
+                .tris
+                .iter()
+                .flat_map(|&t| {
+                    let [a, b, c] = mesh.triangle(t as usize);
+                    [a.to_array(), b.to_array(), c.to_array()]
+                })
+                .collect();
+            let plane = fit_plane(&pts).unwrap();
+            let mut devs: Vec<f32> = pts
+                .iter()
+                .map(|p| (glam::Vec3::from(*p) - plane.point).dot(plane.normal).abs())
+                .collect();
+            devs.sort_by(|a, b| a.total_cmp(b));
+            let p98 = devs[(devs.len() as f32 * 0.98) as usize];
+            println!(
+                "{:?} {} faces  plane rms {:.4} p98 {:.4} max {:.4}  (tol {:.4})  group rms {:.4} r {:.2}  c {:.1?} n {:.2?}",
+                g.kind,
+                g.tris.len(),
+                plane.rms.sqrt(),
+                p98,
+                plane.max_dev,
+                0.0015 * diag,
+                g.rms,
+                g.radius,
+                g.center.to_array(),
+                (if g.kind == crate::geom::segment::GroupKind::Freeform {
+                    plane.normal
+                } else {
+                    g.normal
+                })
+                .to_array()
+            );
+        }
     }
 }

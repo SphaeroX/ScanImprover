@@ -55,8 +55,12 @@ struct SceneEntities {
     fills_mesh: Handle<Mesh>,
     /// Mesh generation currently uploaded; `u64::MAX` = nothing.
     mesh_generation: u64,
+    /// Face-group generation the split was built with.
+    groups_generation: u64,
     /// Crease-split render vertex -> source mesh vertex.
     render_to_mesh: Vec<u32>,
+    /// Render vertex -> one of its triangles (for per-face group colors).
+    render_to_face: Vec<u32>,
     /// Triangle corners as render vertex indices (all triangles).
     render_indices: Vec<u32>,
     /// Content of the overlay meshes currently uploaded.
@@ -224,7 +228,9 @@ fn setup_scene(
         fills,
         fills_mesh,
         mesh_generation: u64::MAX,
+        groups_generation: u64::MAX,
         render_to_mesh: Vec::new(),
+        render_to_face: Vec::new(),
         render_indices: Vec::new(),
         last_lines: Vec::new(),
         last_fills: Vec::new(),
@@ -261,8 +267,14 @@ fn sync_scene(
     // --- Mesh geometry / visibility / colors ---------------------------
     if scan.mesh_dirty {
         if let Some(m) = scan.display().cloned() {
-            if scene.mesh_generation != scan.mesh_generation {
-                let split = CreaseSplit::build(&m, CREASE_COS);
+            if scene.mesh_generation != scan.mesh_generation
+                || scene.groups_generation != scan.groups_generation
+            {
+                // Vertices are also split where the face group changes so
+                // group colors are exact per face.
+                let keys = (scan.group_ids.len() == m.triangle_count())
+                    .then_some(scan.group_ids.as_slice());
+                let split = CreaseSplit::build(&m, CREASE_COS, keys);
                 let mut mesh = Mesh::new(
                     PrimitiveTopology::TriangleList,
                     RenderAssetUsages::default(),
@@ -274,7 +286,7 @@ fn sync_scene(
                     .collect();
                 mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
                 mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, split.normals.clone());
-                let colors = expand(&split.render_to_mesh, &scan.vertex_colors());
+                let colors = scan.vertex_colors(&split.render_to_mesh, &split.render_to_face);
                 mesh.insert_attribute(
                     Mesh::ATTRIBUTE_COLOR,
                     VertexAttributeValues::Float32x4(colors),
@@ -285,8 +297,10 @@ fn sync_scene(
                 )));
                 let _ = meshes.insert(&scene.mesh, mesh);
                 scene.render_to_mesh = split.render_to_mesh;
+                scene.render_to_face = split.render_to_face;
                 scene.render_indices = split.indices;
                 scene.mesh_generation = scan.mesh_generation;
+                scene.groups_generation = scan.groups_generation;
                 scan.aux_dirty = false;
                 scan.sel_dirty = false;
             } else if let Some(mut mesh) = meshes.get_mut(&scene.mesh) {
@@ -302,7 +316,7 @@ fn sync_scene(
         && scene.mesh_generation == scan.mesh_generation
     {
         if let Some(mut mesh) = meshes.get_mut(&scene.mesh) {
-            let colors = expand(&scene.render_to_mesh, &scan.vertex_colors());
+            let colors = scan.vertex_colors(&scene.render_to_mesh, &scene.render_to_face);
             mesh.insert_attribute(
                 Mesh::ATTRIBUTE_COLOR,
                 VertexAttributeValues::Float32x4(colors),
@@ -407,14 +421,6 @@ fn sync_scene(
             ..default()
         });
     }
-}
-
-/// Expands a per-mesh-vertex array to the crease-split render vertices.
-fn expand<T: Copy + Send + Sync>(render_to_mesh: &[u32], per_vertex: &[T]) -> Vec<T> {
-    render_to_mesh
-        .par_iter()
-        .map(|&mv| per_vertex[mv as usize])
-        .collect()
 }
 
 /// Builds a line-list mesh from position + sRGB color vertices.
@@ -537,25 +543,34 @@ pub const CREASE_COS: f32 = 0.866;
 /// while smooth scan surfaces keep smooth shading.
 pub struct CreaseSplit {
     pub render_to_mesh: Vec<u32>,
+    /// One triangle using each render vertex (all its triangles share the
+    /// same face key).
+    pub render_to_face: Vec<u32>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
 
-/// Per mesh vertex: the averaged normal of each smooth group and, per
-/// incident corner, `(triangle, group)`.
-type VertexGroups = (Vec<[f32; 3]>, Vec<(u32, u32)>);
+/// Per mesh vertex: the normal and a representative triangle of each render
+/// vertex, and per incident corner `(corner, render vertex)`.
+type VertexGroups = (Vec<[f32; 3]>, Vec<u32>, Vec<(u32, u32)>);
 
 impl CreaseSplit {
-    pub fn build(mesh: &ScanMesh, crease_cos: f32) -> CreaseSplit {
+    /// Splits vertices at creases (normals differing by more than
+    /// `crease_cos`) and, when `face_key` is given, between triangles with
+    /// different keys (face groups), keeping the crease-group normal on both
+    /// sides so the shading stays continuous.
+    pub fn build(mesh: &ScanMesh, crease_cos: f32, face_key: Option<&[i32]>) -> CreaseSplit {
         let nv = mesh.positions.len();
         let nt = mesh.triangle_count();
         if nv == 0 || nt == 0 {
             return CreaseSplit {
                 render_to_mesh: (0..nv as u32).collect(),
+                render_to_face: vec![0; nv],
                 normals: mesh.normals.clone(),
                 indices: mesh.indices.clone(),
             };
         }
+        let key_of = |tri: usize| face_key.map_or(0, |k| k[tri]);
         // Area-weighted face normals.
         let face_n: Vec<GVec3> = (0..nt)
             .into_par_iter()
@@ -608,33 +623,44 @@ impl CreaseSplit {
                         }
                     }
                 }
-                let mut group_of_root: Vec<(u32, usize)> = Vec::new();
-                let mut sums: Vec<GVec3> = Vec::new();
+                // Crease groups (shared normal) ...
+                let mut root_sum: Vec<(u32, GVec3)> = Vec::new();
+                let roots: Vec<u32> = (0..n).map(|i| find(&mut parent, i as u32)).collect();
+                for (i, &c) in cs.iter().enumerate() {
+                    let r = roots[i];
+                    match root_sum.iter_mut().find(|(root, _)| *root == r) {
+                        Some((_, sum)) => *sum += face_n[c as usize / 3],
+                        None => root_sum.push((r, face_n[c as usize / 3])),
+                    }
+                }
+                // ... subdivided by face key into render vertices.
+                let mut groups: Vec<(u32, i32, u32)> = Vec::new(); // (root, key, face)
+                let mut normals: Vec<[f32; 3]> = Vec::new();
                 let mut corner_groups = Vec::with_capacity(n);
                 for (i, &c) in cs.iter().enumerate() {
-                    let r = find(&mut parent, i as u32);
-                    let g = match group_of_root.iter().find(|(root, _)| *root == r) {
-                        Some((_, g)) => *g,
+                    let r = roots[i];
+                    let tri = c as usize / 3;
+                    let key = key_of(tri);
+                    let g = match groups
+                        .iter()
+                        .position(|(root, k, _)| *root == r && *k == key)
+                    {
+                        Some(g) => g,
                         None => {
-                            group_of_root.push((r, sums.len()));
-                            sums.push(GVec3::ZERO);
-                            sums.len() - 1
+                            groups.push((r, key, tri as u32));
+                            let sum = root_sum.iter().find(|(root, _)| *root == r).unwrap().1;
+                            normals.push(if sum.length_squared() > 1e-20 {
+                                sum.normalize().to_array()
+                            } else {
+                                [0.0, 1.0, 0.0]
+                            });
+                            groups.len() - 1
                         }
                     };
-                    sums[g] += face_n[c as usize / 3];
                     corner_groups.push((c, g as u32));
                 }
-                let normals = sums
-                    .iter()
-                    .map(|s| {
-                        if s.length_squared() > 1e-20 {
-                            s.normalize().to_array()
-                        } else {
-                            [0.0, 1.0, 0.0]
-                        }
-                    })
-                    .collect();
-                (normals, corner_groups)
+                let faces = groups.iter().map(|g| g.2).collect();
+                (normals, faces, corner_groups)
             })
             .collect();
         let mut base = vec![0u32; nv + 1];
@@ -643,12 +669,14 @@ impl CreaseSplit {
         }
         let total = base[nv] as usize;
         let mut render_to_mesh = vec![0u32; total];
+        let mut render_to_face = vec![0u32; total];
         let mut normals = vec![[0.0f32; 3]; total];
         let mut indices = vec![0u32; mesh.indices.len()];
-        for (v, (group_normals, corner_groups)) in per_vertex.iter().enumerate() {
+        for (v, (group_normals, faces, corner_groups)) in per_vertex.iter().enumerate() {
             for (g, n) in group_normals.iter().enumerate() {
                 let rv = base[v] as usize + g;
                 render_to_mesh[rv] = v as u32;
+                render_to_face[rv] = faces[g];
                 normals[rv] = *n;
             }
             for &(corner, g) in corner_groups {
@@ -657,6 +685,7 @@ impl CreaseSplit {
         }
         CreaseSplit {
             render_to_mesh,
+            render_to_face,
             normals,
             indices,
         }
@@ -716,7 +745,7 @@ mod tests {
     fn crease_split_separates_cube_faces_but_keeps_smooth_surfaces() {
         let cube = cube();
         assert_eq!(cube.vertex_count(), 8);
-        let split = CreaseSplit::build(&cube, CREASE_COS);
+        let split = CreaseSplit::build(&cube, CREASE_COS, None);
         assert_eq!(split.render_to_mesh.len(), 24);
         assert_eq!(split.indices.len(), cube.indices.len());
         for chunk in split.indices.chunks_exact(3) {
@@ -740,7 +769,7 @@ mod tests {
             ],
             vec![0, 1, 2, 1, 3, 2],
         );
-        let split = CreaseSplit::build(&flat, CREASE_COS);
+        let split = CreaseSplit::build(&flat, CREASE_COS, None);
         assert_eq!(split.render_to_mesh.len(), 4);
         assert_eq!(split.indices, flat.indices);
     }

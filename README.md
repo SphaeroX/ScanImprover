@@ -52,7 +52,7 @@ The screenshots use the example meshes from `examples/` (fandisk, rocker arm, St
   - Cylinder and sphere fitting, circle fitting as cylinder cross-sections
   - Coordinate system realignment (origin, X/Y/Z primary directions, 3-2-1 datum alignment from fitted features)
 - **Automatic Face Groups:**
-  - Region-growing segmentation with live crease-angle preview
+  - Scan-aware segmentation: smoothed normals, feature-size crease detection (fillets and small features separate surfaces, noise does not), live crease-angle preview
   - Automatic classification as plane / cylinder / sphere with fitted parameters
   - Distinct or by-type coloring to quickly find functional surfaces
 - **Selection & Editing Tools:**
