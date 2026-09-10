@@ -87,3 +87,36 @@ fn fmt(v: f32) -> String {
     let s = format!("{v:.6}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polygons_are_fanned_and_negative_indices_resolve() {
+        let text = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n# quad with texture/normal refs\nf 1/1/1 2/2/2 3/3/3 4/4/4\nf -4 -3 -2\n";
+        let m = load(text.as_bytes()).unwrap();
+        assert_eq!(m.vertex_count(), 4);
+        assert_eq!(m.triangle_count(), 3);
+        assert_eq!(&m.indices[6..9], &[0, 1, 2]);
+    }
+
+    #[test]
+    fn rejects_out_of_range_and_empty_input() {
+        assert!(load(b"v 0 0 0\nv 1 0 0\nf 1 2 3\n").is_err());
+        assert!(load(b"v 0 0 0\n").is_err());
+        assert!(load(b"v 0 0\n").is_err());
+    }
+
+    #[test]
+    fn save_writes_normals_and_one_based_faces() {
+        let m = Mesh::from_indexed(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![0, 1, 2],
+        );
+        let s = save(&m);
+        assert!(s.contains("v 0 0 0\n"));
+        assert!(s.contains("vn 0 0 1\n"));
+        assert!(s.contains("f 1//1 2//2 3//3\n"));
+    }
+}

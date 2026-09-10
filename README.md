@@ -2,7 +2,7 @@
 
 > **Note:** This project is 100% **Vibe Coding** — created iteratively and experimentally with AI assistance, but it works exceptionally well for my daily workflow!
 
-**ScanImprover** is a lightweight, high-performance desktop application built in Rust for pre-processing 3D scan meshes (STL, OBJ, etc.) before importing them into CAD environments like **Autodesk Fusion 360**.
+**ScanImprover** is a lightweight, high-performance desktop application built in Rust for pre-processing 3D scan meshes (STL, OBJ, PLY) before importing them into CAD environments like **Autodesk Fusion 360**.
 
 ---
 
@@ -40,21 +40,25 @@ When working with 3D scan data for reverse engineering in CAD software, two majo
 
 ## ✨ Key Features
 
-- **Blazing Fast Native Performance:** Built with Rust, `wgpu`, and multi-threaded processing via `rayon`.
-- **Mesh Decimation:** Fast, high-quality simplification to bring multi-million triangle meshes down to lightweight CAD-friendly sizes.
+- **Blazing Fast Native Performance:** Built with Rust, the [Bevy](https://bevy.org) engine (wgpu based) for the 3D viewport, `egui` for the interface, and multi-threaded processing via `rayon`. Every long operation (loading, decimation, analysis, repair, segmentation, export) runs on worker threads with a live activity feed — the UI never blocks.
+- **Light & Dark Themes:** WCAG AA conformant palettes; panel sizes, theme and view settings are remembered between runs.
+- **Modern CAD Viewport:** 4x anti-aliased rendering, ground grid, navigation gizmo, turntable orbit camera that rotates around the point under the cursor, zoom-to-cursor, exact panning, animated view presets and a selectable up axis (Y or Z).
+- **Mesh Decimation:** Fast, high-quality simplification (meshoptimizer) to bring multi-million triangle meshes down to lightweight CAD-friendly sizes, with measured deviation and a heatmap.
 - **Interactive Primitive Fitting & Alignment:**
-  - Plane fitting (RANSAC / least-squares)
-  - Cylinder and sphere fitting
-  - Coordinate system realignment (Origin, X/Y/Z primary directions)
+  - Plane fitting (least-squares)
+  - Cylinder and sphere fitting, circle fitting as cylinder cross-sections
+  - Coordinate system realignment (origin, X/Y/Z primary directions, 3-2-1 datum alignment from fitted features)
 - **Automatic Face Groups:**
   - Region-growing segmentation with live crease-angle preview
   - Automatic classification as plane / cylinder / sphere with fitted parameters
   - Distinct or by-type coloring to quickly find functional surfaces
 - **Selection & Editing Tools:**
-  - Brush selection, point picking, and connected component filtering
+  - Connected brush selection (no bleeding through thin walls), region double-click, grow / shrink by crease angle
+  - Non-destructive hiding of regions to reach geometry behind
   - Crop / cut / delete unwanted artifacts and noise
-- **Format Support:** Fast loading and exporting for common 3D mesh formats (e.g. STL, OBJ).
-- **Clean & Modern UI:** Rendered with `egui` and hardware-accelerated with WebGPU (`wgpu`).
+- **Mesh Repair:** Health diagnostics (holes, non-manifold edges and vertices, shells, degenerate faces), hole filling with several algorithms and edge-flip quality improvement, contour bridges, normal unification and debris removal.
+- **Freeform Surfaces:** Moving-least-squares surface fitting with overshoot, exported as real B-spline STEP patches for CAD.
+- **Format Support:** Fast parallel loading and exporting of STL, PLY and OBJ; reference geometry export as STEP, DXF or Fusion 360 script.
 
 ---
 
@@ -66,21 +70,40 @@ When working with 3D scan data for reverse engineering in CAD software, two majo
 
 ### Running the App
 
-You can quickly run the app using Cargo:
-
 ```bash
 cargo run --release
 ```
 
-Or using the included batch scripts on Windows:
+You can also pass a mesh file on the command line or drag and drop one onto the window.
+
+Windows batch scripts:
 - `start.bat`: Runs the existing build
 - `build_and_start.bat`: Builds the latest code in release mode and launches it
+
+### Navigation & Shortcuts
+
+| Input | Action |
+| --- | --- |
+| Right mouse drag | Orbit around the point under the cursor |
+| Middle mouse drag / Shift + right drag | Pan |
+| Mouse wheel | Zoom towards the cursor |
+| Left mouse drag / Shift + drag | Paint / erase face selection |
+| Double-click | Select the face group or crease-bounded region |
+| Ctrl + wheel, `.` / `,` | Grow / shrink the selection |
+| Alt + wheel | Brush size |
+| `F` | Fit selection (or model) into view |
+| `1` `2` `3` `4` | X / Y / Z / iso views |
+| `G` | Toggle the ground grid |
+| `H` | Hide the selected faces |
+| Ctrl + `O`, Ctrl + `Z`, Ctrl + `Y` | Open, undo, redo |
+
+Click an axis on the navigation gizmo (bottom right of the viewport) to look along it; click it again to look from the opposite side.
 
 ---
 
 ## 🛠️ Recommended Reverse Engineering Workflow (with Fusion 360)
 
-1. **Import Scan:** Open your raw `.stl` or `.obj` scan in ScanImprover.
+1. **Import Scan:** Open your raw `.stl`, `.ply` or `.obj` scan in ScanImprover.
 2. **Clean Noise:** Trim away excess scan noise, table planes, or scanning artifacts.
 3. **Decimate:** Reduce polygon density to a manageable size (e.g. 50k–250k triangles depending on detail).
 4. **Align Coordinate System:**
@@ -89,6 +112,22 @@ Or using the included batch scripts on Windows:
    - Set the origin (0, 0, 0) to a functional reference datum.
 5. **Export:** Export the cleaned and aligned mesh.
 6. **CAD Reverse Engineering:** Insert the optimized mesh directly into Fusion 360. Sketches and reference geometry will automatically line up with Fusion's default origin planes without any viewport lag.
+
+---
+
+## 🧱 Code Layout
+
+| Path | Contents |
+| --- | --- |
+| `src/app/` | Application state split by concern: history, session (loading / transforms / jobs), features, selection, repair, tasks (worker-backed operations), viewport |
+| `src/camera.rs` | Turntable orbit camera with animated transitions |
+| `src/render/` | Bevy scene: mesh entities with crease-split normals, overlay line / fill meshes, gizmos, camera and lights synced from the app state |
+| `src/geom/` | Geometry algorithms: SAH BVH, fitting, segmentation, symmetry, freeform, holes, repair, bridges |
+| `src/io/`, `src/export/` | Mesh readers / writers and CAD reference exports |
+| `src/ui/` | egui panels (via `bevy_egui`), theme, toolbar, status bar, object browser |
+| `src/worker.rs` | Worker thread pool with progress reporting |
+
+Run the tests with `cargo test`. `cargo run -- model.stl --screenshot out.png` renders a few frames, saves the window to `out.png` and exits (used for automated visual checks). A list of all fixes and improvements of the 2026 refactoring pass is in `CHANGES.md`.
 
 ---
 

@@ -69,3 +69,25 @@ pub fn per_vertex_max(per_tri: &[f32], indices: &[u32], nverts: usize) -> Vec<f3
     }
     per_vert
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_triangle_and_per_vertex_max_propagate_distances() {
+        // One triangle in z = 0; sample points above it at different heights.
+        let positions = vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]];
+        let indices = vec![0u32, 1, 2];
+        let bvh = Bvh::new(&positions, &indices);
+        let points = vec![[1.0, 1.0, 0.5], [1.5, 1.5, 2.0], [0.5, 0.5, 1.0]];
+        let per_tri = per_triangle_max(&points, &bvh, 1);
+        assert!((per_tri[0] - 2.0).abs() < 1e-6);
+        let per_vert = per_vertex_max(&per_tri, &indices, 3);
+        assert!(per_vert.iter().all(|&d| (d - 2.0).abs() < 1e-6));
+        let dev = deviation(&points, &bvh);
+        assert!((dev.max_dev - 2.0).abs() < 1e-6);
+        assert_eq!(dev.count, 3);
+        assert!(deviation(&[], &bvh).count == 0);
+    }
+}

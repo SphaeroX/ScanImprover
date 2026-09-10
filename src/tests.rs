@@ -1,4 +1,9 @@
 #[cfg(test)]
+#[allow(
+    clippy::module_inception,
+    clippy::field_reassign_with_default,
+    clippy::redundant_locals
+)]
 mod tests {
     use crate::decimate;
     use crate::geom::boundary::{find_boundary_edges, generate_hole_mask};
@@ -159,7 +164,7 @@ mod tests {
         let mut rng = Rng::new(99);
         let pts = m.sample_surface(200, &mut rng);
         for p in pts {
-            let p = Vec3::from(p);
+            let p = p;
             let d_bvh = bvh.closest_distance(p);
             let mut best = f32::MAX;
             for t in 0..m.triangle_count() {
@@ -478,7 +483,7 @@ mod tests {
         let target = 0.05f32;
         let (simplified, est, dev, _heat, iterations) =
             crate::worker::auto_decimate(&m, target, false).unwrap();
-        assert!(iterations >= 1 && iterations <= 5);
+        assert!((1..=5).contains(&iterations));
         assert!(
             dev.max_dev <= target * 1.6,
             "measured {} vs target {}",
@@ -1025,7 +1030,10 @@ mod tests {
             smooth_iterations: 20,
         };
         let patch_bulge = generate_hole_patch(&m_bulge, target_hole, cfg_bulge).unwrap();
-        assert!(!patch_bulge.new_positions.is_empty(), "High density Liepa should add interior vertices");
+        assert!(
+            !patch_bulge.new_positions.is_empty(),
+            "High density Liepa should add interior vertices"
+        );
         apply_patch(&mut m_bulge, &patch_bulge);
         assert_eq!(detect_holes(&m_bulge).len(), 0);
 
@@ -1079,8 +1087,8 @@ mod tests {
     #[test]
     fn test_mesh_diagnostics_and_repair() {
         use crate::geom::repair::{
-            analyze_mesh, auto_repair_mesh, remove_degenerate_faces,
-            remove_small_components, unify_normals,
+            analyze_mesh, auto_repair_mesh, remove_degenerate_faces, remove_small_components,
+            unify_normals,
         };
 
         // 1. Watertight check
@@ -1152,7 +1160,7 @@ mod tests {
     #[test]
     fn test_hole_solver_planar_guidance() {
         use crate::geom::hole_detect::detect_holes;
-        use crate::geom::hole_solver::{solve_best_hole_config, ReferenceGeometry};
+        use crate::geom::hole_solver::{ReferenceGeometry, solve_best_hole_config};
 
         // Create a planar ring (flat surface on z = 0 with a central hole)
         let mut positions = Vec::new();
@@ -1189,7 +1197,10 @@ mod tests {
         let holes = detect_holes(&mesh);
         assert!(!holes.is_empty());
 
-        let inner_hole = holes.iter().find(|h| h.perimeter < 40.0).expect("Inner hole");
+        let inner_hole = holes
+            .iter()
+            .find(|h| h.perimeter < 40.0)
+            .expect("Inner hole");
 
         let ref_plane = ReferenceGeometry::Plane {
             id: 1,
@@ -1198,16 +1209,26 @@ mod tests {
             normal: glam::Vec3::Z,
         };
 
-        let result = solve_best_hole_config(&mesh, inner_hole, &[ref_plane]).expect("Solver succeeds");
-        assert!(result.rms_error < 1e-3, "RMS error should be virtually zero on plane, got {}", result.rms_error);
-        assert!(result.tested_count > 10, "Should have tested multiple candidate configurations");
+        let result =
+            solve_best_hole_config(&mesh, inner_hole, &[ref_plane]).expect("Solver succeeds");
+        assert!(
+            result.rms_error < 1e-3,
+            "RMS error should be virtually zero on plane, got {}",
+            result.rms_error
+        );
+        assert!(
+            result.tested_count > 10,
+            "Should have tested multiple candidate configurations"
+        );
     }
 
     #[test]
     fn test_hole_solver_cylinder_and_multi_reference() {
         use crate::geom::hole_detect::detect_holes;
-        use crate::geom::hole_solver::{solve_best_hole_config, refine_patch_to_references, ReferenceGeometry};
         use crate::geom::hole_fill::generate_hole_patch;
+        use crate::geom::hole_solver::{
+            ReferenceGeometry, refine_patch_to_references, solve_best_hole_config,
+        };
 
         let mut positions = Vec::new();
         let mut indices = Vec::new();
@@ -1264,19 +1285,23 @@ mod tests {
         };
 
         let refs = vec![ref_plane, ref_circle.clone()];
-        let small_hole = holes.iter().min_by(|a, b| a.perimeter.partial_cmp(&b.perimeter).unwrap()).unwrap();
+        let small_hole = holes
+            .iter()
+            .min_by(|a, b| a.perimeter.partial_cmp(&b.perimeter).unwrap())
+            .unwrap();
 
         let result = solve_best_hole_config(&mesh, small_hole, &refs).expect("Solve succeeds");
         assert!(result.tested_count > 0);
 
-        let mut patch = generate_hole_patch(&mesh, small_hole, result.best_config).expect("Generate patch");
+        let mut patch =
+            generate_hole_patch(&mesh, small_hole, result.best_config).expect("Generate patch");
         refine_patch_to_references(&mut patch, &mesh, small_hole, &refs);
         assert!(!patch.new_positions.is_empty() || !patch.preview_positions.is_empty());
     }
 
     #[test]
     fn test_hole_solver_circle_disk_and_rim_no_infinite_cylinder() {
-        use crate::geom::hole_solver::{ReferenceGeometry, CircleGuideMode};
+        use crate::geom::hole_solver::{CircleGuideMode, ReferenceGeometry};
 
         let ref_circle = ReferenceGeometry::Circle {
             id: 1,
@@ -1288,17 +1313,28 @@ mod tests {
         };
 
         // Point inside the circle on plane z=0
-        assert_eq!(ref_circle.distance_to_point(glam::Vec3::new(5.0, 0.0, 0.0)), 0.0);
+        assert_eq!(
+            ref_circle.distance_to_point(glam::Vec3::new(5.0, 0.0, 0.0)),
+            0.0
+        );
 
         // Point outside the circle on plane z=0 (at r=15)
         // With previous broken cylinder code, this returned 0.0. Now it returns 5.0!
         let dist_outside = ref_circle.distance_to_point(glam::Vec3::new(15.0, 0.0, 0.0));
-        assert!((dist_outside - 5.0).abs() < 1e-4, "Expected distance 5.0, got {}", dist_outside);
+        assert!(
+            (dist_outside - 5.0).abs() < 1e-4,
+            "Expected distance 5.0, got {}",
+            dist_outside
+        );
 
         // Point 20 mm above the circle axis
         // With previous broken cylinder code, this returned 0.0. Now it returns 20.0!
         let dist_above = ref_circle.distance_to_point(glam::Vec3::new(0.0, 0.0, 20.0));
-        assert!((dist_above - 20.0).abs() < 1e-4, "Expected distance 20.0, got {}", dist_above);
+        assert!(
+            (dist_above - 20.0).abs() < 1e-4,
+            "Expected distance 20.0, got {}",
+            dist_above
+        );
     }
 
     #[test]
@@ -1377,10 +1413,7 @@ mod tests {
             groups[0].radius
         );
         assert!(groups[0].normal.dot(Vec3::Z).abs() > 0.99);
-        assert_eq!(
-            ids.iter().filter(|&&g| g == 0).count(),
-            m.triangle_count()
-        );
+        assert_eq!(ids.iter().filter(|&&g| g == 0).count(), m.triangle_count());
     }
 
     #[test]
@@ -1476,7 +1509,10 @@ mod tests {
             .find(|&t| app.group_ids[t] != gid)
             .unwrap() as u32;
         app.select_region_under(other_tri);
-        assert_eq!(app.sel_count, 4, "additive double-click must merge selections");
+        assert_eq!(
+            app.sel_count, 4,
+            "additive double-click must merge selections"
+        );
 
         // Replace mode: double-click replaces the selection.
         app.group_sel_additive = false;
@@ -1500,13 +1536,31 @@ mod tests {
         assert!(group_matches_filter(GroupKind::Plane, GroupFilter::All));
         assert!(group_matches_filter(GroupKind::Freeform, GroupFilter::All));
         assert!(group_matches_filter(GroupKind::Plane, GroupFilter::Plane));
-        assert!(!group_matches_filter(GroupKind::Cylinder, GroupFilter::Plane));
-        assert!(group_matches_filter(GroupKind::Cylinder, GroupFilter::Cylinder));
-        assert!(!group_matches_filter(GroupKind::Plane, GroupFilter::Cylinder));
+        assert!(!group_matches_filter(
+            GroupKind::Cylinder,
+            GroupFilter::Plane
+        ));
+        assert!(group_matches_filter(
+            GroupKind::Cylinder,
+            GroupFilter::Cylinder
+        ));
+        assert!(!group_matches_filter(
+            GroupKind::Plane,
+            GroupFilter::Cylinder
+        ));
         assert!(group_matches_filter(GroupKind::Sphere, GroupFilter::Sphere));
-        assert!(!group_matches_filter(GroupKind::Sphere, GroupFilter::Freeform));
-        assert!(group_matches_filter(GroupKind::Freeform, GroupFilter::Freeform));
-        assert!(!group_matches_filter(GroupKind::Cylinder, GroupFilter::Sphere));
+        assert!(!group_matches_filter(
+            GroupKind::Sphere,
+            GroupFilter::Freeform
+        ));
+        assert!(group_matches_filter(
+            GroupKind::Freeform,
+            GroupFilter::Freeform
+        ));
+        assert!(!group_matches_filter(
+            GroupKind::Cylinder,
+            GroupFilter::Sphere
+        ));
     }
 
     /// Curved grid patch mesh (wavy height field over the XY plane).
@@ -1665,7 +1719,7 @@ mod tests {
         assert_eq!(app.selected_freeform_id, Some(app.freeforms[0].id));
 
         // Pump the async worker until the fit lands.
-        let ctx = eframe::egui::Context::default();
+        let ctx = egui::Context::default();
         let mut waited = 0;
         while app.freeform_job.is_some() && waited < 2400 {
             app.handle_worker(&ctx);
@@ -1674,7 +1728,7 @@ mod tests {
         }
         assert!(app.freeform_job.is_none(), "fit job did not finish");
         assert!(app.freeforms[0].surface.is_some(), "surface must be fitted");
-        assert!(app.freeforms[0].boundary.len() > 0, "boundary must exist");
+        assert!(!app.freeforms[0].boundary.is_empty(), "boundary must exist");
         assert!(app.freeforms[0].rms >= 0.0);
 
         // Changing parameters schedules a refit with the new values.
@@ -1707,7 +1761,10 @@ mod tests {
         app.sel_count = tris;
 
         app.fit_freeform_from_selection();
-        assert!(app.freeform_job.is_some(), "first fit must hold the job slot");
+        assert!(
+            app.freeform_job.is_some(),
+            "first fit must hold the job slot"
+        );
 
         // A second fit while the first job runs must be queued, not dropped.
         app.fit_freeform_from_selection();
@@ -1723,7 +1780,7 @@ mod tests {
         );
 
         // Pump until both surfaces are fitted.
-        let ctx = eframe::egui::Context::default();
+        let ctx = egui::Context::default();
         let mut waited = 0;
         while (app.freeform_job.is_some() || app.freeforms.iter().any(|f| f.refit_pending))
             && waited < 2400
@@ -1795,11 +1852,7 @@ mod tests {
         for i in 0..40 {
             for j in 0..40 {
                 let (x, y) = (i as f32 * 0.5, j as f32 * 0.5);
-                pts.push([
-                    x,
-                    y,
-                    0.5 * (x * 0.3).sin() + (rng.f32() - 0.5) * 0.2,
-                ]);
+                pts.push([x, y, 0.5 * (x * 0.3).sin() + (rng.f32() - 0.5) * 0.2]);
             }
         }
         let make = |smoothness| FreeformParams {
@@ -1835,8 +1888,7 @@ mod tests {
     #[test]
     fn freeform_bicubic_interpolates_grid() {
         use crate::geom::freeform::{
-            FreeformExtend, FreeformParams, bicubic_control_net, eval_bicubic,
-            fit_freeform_grid,
+            FreeformExtend, FreeformParams, bicubic_control_net, eval_bicubic, fit_freeform_grid,
         };
 
         let mut pts = Vec::new();
@@ -1858,8 +1910,14 @@ mod tests {
         assert_eq!(net.cps[0].len(), grid.nx + 1);
 
         // The B-spline surface must pass exactly through the grid nodes.
-        for (i, j) in [(0usize, 0usize), (grid.nx, 0), (0, grid.ny), (grid.nx, grid.ny),
-                       (grid.nx / 2, grid.ny / 2), (grid.nx / 3, 2 * grid.ny / 3)] {
+        for (i, j) in [
+            (0usize, 0usize),
+            (grid.nx, 0),
+            (0, grid.ny),
+            (grid.nx, grid.ny),
+            (grid.nx / 2, grid.ny / 2),
+            (grid.nx / 3, 2 * grid.ny / 3),
+        ] {
             let expected = grid.origin
                 + grid.u * (grid.x0 + i as f32 * grid.gw)
                 + grid.v * (grid.y0 + j as f32 * grid.gh)
@@ -1910,7 +1968,11 @@ mod tests {
         // One cartesian point per control point, plus global placement origin.
         let cp_count = (grid.nx + 1) * (grid.ny + 1);
         let point_count = content.matches("CARTESIAN_POINT").count();
-        assert_eq!(point_count, cp_count + 1, "one point per control point plus origin expected");
+        assert_eq!(
+            point_count,
+            cp_count + 1,
+            "one point per control point plus origin expected"
+        );
         // Clamped bicubic knot summary: multiplicities start and end with 4.
         let surface_line = content
             .lines()
@@ -1934,11 +1996,7 @@ mod tests {
             if line.starts_with('#') {
                 let opens = line.matches('(').count();
                 let closes = line.matches(')').count();
-                assert_eq!(
-                    opens,
-                    closes,
-                    "unbalanced parens in STEP line: {line}"
-                );
+                assert_eq!(opens, closes, "unbalanced parens in STEP line: {line}");
             }
         }
         // Curve form: 1 form flag + 2 logicals (closed, self_intersect).
@@ -2069,17 +2127,33 @@ mod tests {
 
         // TrafficLight: 0.0 mm -> Green, 0.5 * max -> Yellow, 1.0 * max -> Red.
         let col_zero = freeform_vertex_color(0.0, 0.2, FreeformGradient::TrafficLight, 1.0);
-        assert!(col_zero[1] > 0.8 && col_zero[0] < 0.2, "Zero dist must be green: {:?}", col_zero);
+        assert!(
+            col_zero[1] > 0.8 && col_zero[0] < 0.2,
+            "Zero dist must be green: {:?}",
+            col_zero
+        );
 
         let col_max = freeform_vertex_color(0.2, 0.2, FreeformGradient::TrafficLight, 1.0);
-        assert!(col_max[0] > 0.9 && col_max[1] < 0.2, "Max dist must be red: {:?}", col_max);
+        assert!(
+            col_max[0] > 0.9 && col_max[1] < 0.2,
+            "Max dist must be red: {:?}",
+            col_max
+        );
 
         // Spectrum: 0.0 mm -> Blue, 1.0 * max -> Red.
         let col_spec_zero = freeform_vertex_color(0.0, 0.2, FreeformGradient::Spectrum, 1.0);
-        assert!(col_spec_zero[2] > 0.8 && col_spec_zero[0] < 0.2, "Zero dist in spectrum must be blue: {:?}", col_spec_zero);
+        assert!(
+            col_spec_zero[2] > 0.8 && col_spec_zero[0] < 0.2,
+            "Zero dist in spectrum must be blue: {:?}",
+            col_spec_zero
+        );
 
         let col_spec_max = freeform_vertex_color(0.25, 0.2, FreeformGradient::Spectrum, 1.0);
-        assert!(col_spec_max[0] > 0.9 && col_spec_max[2] < 0.1, "Clamped max dist in spectrum must be red: {:?}", col_spec_max);
+        assert!(
+            col_spec_max[0] > 0.9 && col_spec_max[2] < 0.1,
+            "Clamped max dist in spectrum must be red: {:?}",
+            col_spec_max
+        );
     }
 
     #[test]
@@ -2105,7 +2179,9 @@ mod tests {
         assert!(plane_step.contains("PRODUCT('Reference Geometry','Reference Geometry','',(#"));
         assert!(plane_step.contains("ADVANCED_FACE('Test Plane',(#"));
         assert!(plane_step.contains("SHELL_BASED_SURFACE_MODEL('Reference Surfaces',(#"));
-        assert!(plane_step.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Reference Geometry',(#"));
+        assert!(
+            plane_step.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('Reference Geometry',(#")
+        );
 
         // Test freeform step export
         let mut cps = vec![vec![glam::Vec3::ZERO; 4]; 4];
@@ -2132,7 +2208,9 @@ mod tests {
         // Verify that outside of B_SPLINE_SURFACE_WITH_KNOTS 2D control point array,
         // FILE_DESCRIPTION, FILE_SCHEMA and complex entities, there are no ((#
         for line in ff_step.lines() {
-            if line.contains("B_SPLINE_SURFACE_WITH_KNOTS") || line.contains("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT") {
+            if line.contains("B_SPLINE_SURFACE_WITH_KNOTS")
+                || line.contains("GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT")
+            {
                 continue;
             }
             assert!(
@@ -2173,7 +2251,10 @@ mod tests {
         // Combine them back
         let recombined = kept.combine(&hidden);
         assert_eq!(recombined.triangle_count(), 12);
-        assert_eq!(recombined.vertex_count(), kept.vertex_count() + hidden.vertex_count());
+        assert_eq!(
+            recombined.vertex_count(),
+            kept.vertex_count() + hidden.vertex_count()
+        );
         for &idx in &recombined.indices {
             assert!((idx as usize) < recombined.vertex_count());
         }
@@ -2198,7 +2279,7 @@ mod tests {
         assert_eq!(app.hidden_regions.len(), 1);
         let hr_id = app.hidden_regions[0].id;
         assert_eq!(app.hidden_regions[0].name, "Hidden Region 1");
-        assert_eq!(app.hidden_regions[0].visible, false);
+        assert!(!app.hidden_regions[0].visible);
         assert_eq!(app.hidden_regions[0].triangle_count(), 2);
         // Mesh itself remains completely whole and intact!
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
@@ -2210,13 +2291,13 @@ mod tests {
 
         // Toggle visibility to true (einblenden)
         app.toggle_hidden_region_visibility(hr_id);
-        assert_eq!(app.hidden_regions[0].visible, true);
+        assert!(app.hidden_regions[0].visible);
         assert!(!app.is_face_hidden(0));
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
 
         // Toggle visibility back to false (ausblenden)
         app.toggle_hidden_region_visibility(hr_id);
-        assert_eq!(app.hidden_regions[0].visible, false);
+        assert!(!app.hidden_regions[0].visible);
         assert!(app.is_face_hidden(0));
         assert_eq!(app.current.as_ref().unwrap().triangle_count(), 12);
 
@@ -2268,7 +2349,11 @@ mod tests {
         // With all visible, picking center hits the front box
         let bvh1 = app.ensure_bvh().expect("BVH should build");
         let hit1 = ray_pick(&bvh1, &cam, 400.0, 300.0, 800.0, 600.0).expect("Should hit front box");
-        assert!(hit1.pos.z < 2.0, "Hit should be on front box (z < 2.0), got z = {}", hit1.pos.z);
+        assert!(
+            hit1.pos.z < 2.0,
+            "Hit should be on front box (z < 2.0), got z = {}",
+            hit1.pos.z
+        );
 
         // Select the front box faces (first 12 triangles) and hide them
         let mut sel = vec![0u8; total_tris];
@@ -2286,8 +2371,13 @@ mod tests {
         // Now picking center with filter penetrates right through the hidden front box and hits the rear box!
         let bvh2 = app.ensure_bvh().expect("BVH should build");
         let is_hidden = |t: u32| app.is_face_hidden(t);
-        let hit2 = ray_pick_filtered(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0, &is_hidden).expect("Should hit rear box");
-        assert!(hit2.pos.z > 8.0, "Hit should penetrate and be on rear box (z > 8.0), got z = {}", hit2.pos.z);
+        let hit2 = ray_pick_filtered(&bvh2, &cam, 400.0, 300.0, 800.0, 600.0, is_hidden)
+            .expect("Should hit rear box");
+        assert!(
+            hit2.pos.z > 8.0,
+            "Hit should penetrate and be on rear box (z > 8.0), got z = {}",
+            hit2.pos.z
+        );
     }
 
     #[test]
@@ -2329,8 +2419,8 @@ mod tests {
     #[test]
     fn test_bridge_cluster_detection_and_generation() {
         use crate::geom::bridge::{
-            apply_bridge_patch, detect_selection_clusters, generate_bridge_patch, BridgeConfig,
-            BridgeMethod,
+            BridgeConfig, BridgeMethod, apply_bridge_patch, detect_selection_clusters,
+            generate_bridge_patch,
         };
         use crate::geom::repair::analyze_mesh;
 
@@ -2373,8 +2463,8 @@ mod tests {
         sel[3] = 1;
 
         // Detect clusters
-        let (ca, cb) = detect_selection_clusters(&mesh, &sel, None)
-            .expect("Should detect 2 clusters");
+        let (ca, cb) =
+            detect_selection_clusters(&mesh, &sel, None).expect("Should detect 2 clusters");
         assert_eq!(ca.triangles.len(), 2);
         assert_eq!(cb.triangles.len(), 2);
         assert!(ca.boundary_chain.len() >= 2);
@@ -2386,8 +2476,8 @@ mod tests {
         config.segments = 4;
         let patch_linear = generate_bridge_patch(&mesh, &ca, &cb, config)
             .expect("Bridge patch generation should succeed");
-        assert!(patch_linear.new_positions.len() > 0);
-        assert!(patch_linear.new_indices.len() > 0);
+        assert!(!patch_linear.new_positions.is_empty());
+        assert!(!patch_linear.new_indices.is_empty());
         assert_eq!(patch_linear.new_indices.len() % 3, 0);
 
         // Generate Cubic Hermite curved bridge
@@ -2396,8 +2486,8 @@ mod tests {
         config.segments = 6;
         let patch_hermite = generate_bridge_patch(&mesh, &ca, &cb, config)
             .expect("Cubic Hermite bridge should succeed");
-        assert!(patch_hermite.new_positions.len() > 0);
-        assert!(patch_hermite.new_indices.len() > 0);
+        assert!(!patch_hermite.new_positions.is_empty());
+        assert!(!patch_hermite.new_indices.is_empty());
 
         // Apply bridge patch to mesh
         let mut bridged_mesh = mesh.clone();
@@ -2415,17 +2505,23 @@ mod tests {
             let p2 = Vec3::from(bridged_mesh.positions[i2 as usize]);
             let area_sq = (p1 - p0).cross(p2 - p0).length_squared();
             if i0 == i1 || i1 == i2 || i2 == i0 || area_sq < 1e-14 {
-                println!("Degenerate tri {}: ({}, {}, {}), area_sq: {:e}, p0: {:?}, p1: {:?}, p2: {:?}", t, i0, i1, i2, area_sq, p0, p1, p2);
+                println!(
+                    "Degenerate tri {}: ({}, {}, {}), area_sq: {:e}, p0: {:?}, p1: {:?}, p2: {:?}",
+                    t, i0, i1, i2, area_sq, p0, p1, p2
+                );
             }
         }
-        assert_eq!(health.non_manifold_edges, 0, "Bridged mesh must be manifold");
+        assert_eq!(
+            health.non_manifold_edges, 0,
+            "Bridged mesh must be manifold"
+        );
         assert_eq!(health.degenerate_faces, 0);
     }
 
     #[test]
     fn test_bridge_splits_single_hole_into_two() {
         use crate::geom::bridge::{
-            apply_bridge_patch, detect_selection_clusters, generate_bridge_patch, BridgeConfig,
+            BridgeConfig, apply_bridge_patch, detect_selection_clusters, generate_bridge_patch,
         };
         use crate::geom::hole_detect::detect_holes;
         use crate::geom::repair::analyze_mesh;
@@ -2517,7 +2613,10 @@ mod tests {
         );
 
         let health = analyze_mesh(&bridged_mesh);
-        assert_eq!(health.non_manifold_edges, 0, "No non-manifold edges after hole bridge");
+        assert_eq!(
+            health.non_manifold_edges, 0,
+            "No non-manifold edges after hole bridge"
+        );
     }
 
     #[test]
@@ -2554,17 +2653,29 @@ mod tests {
         app.recount_sel();
 
         // Verify bridge preview is NOT automatically generated until activated
-        assert!(app.bridge_preview_patch.is_none(), "Preview patch should not be generated automatically");
-        assert!(!app.bridge_preview_active, "Bridge preview should be inactive by default");
+        assert!(
+            app.bridge_preview_patch.is_none(),
+            "Preview patch should not be generated automatically"
+        );
+        assert!(
+            !app.bridge_preview_active,
+            "Bridge preview should be inactive by default"
+        );
 
         // Explicitly activate bridge preview
         app.set_bridge_preview_active(true);
-        assert!(app.bridge_preview_patch.is_some(), "Preview patch should be generated when active");
+        assert!(
+            app.bridge_preview_patch.is_some(),
+            "Preview patch should be generated when active"
+        );
         assert!(app.bridge_status.is_some(), "Bridge status should be set");
 
         // Apply bridge
         app.apply_bridge();
-        assert!(!app.bridge_preview_active, "Bridge preview should deactivate after apply");
+        assert!(
+            !app.bridge_preview_active,
+            "Bridge preview should deactivate after apply"
+        );
 
         assert!(
             app.current.as_ref().unwrap().triangle_count() > orig_tris,
@@ -2581,5 +2692,3 @@ mod tests {
         );
     }
 }
-
-

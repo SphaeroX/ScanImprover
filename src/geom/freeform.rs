@@ -158,6 +158,7 @@ struct EvalCtx {
 /// Projects the points, evaluates the MLS height field at every grid node and
 /// applies the configured smoothing passes. With `all_valid` the grid covers
 /// the full (overshoot) rectangle — used for the CAD export patch.
+#[allow(clippy::type_complexity)]
 fn build_fit_grid(
     points: &[[f32; 3]],
     params: &FreeformParams,
@@ -237,7 +238,8 @@ fn build_fit_grid(
 
     // Every grid node lies within sqrt(2)*ov of the data bbox, so a ring
     // search capped at this many rings always finds data.
-    let max_rings = (((ov * std::f32::consts::SQRT_2) / (spacing * 2.0)).ceil() as i32 + 8).min(200);
+    let max_rings =
+        (((ov * std::f32::consts::SQRT_2) / (spacing * 2.0)).ceil() as i32 + 8).min(200);
     let valid_dist = (GAP_FILL_SPACING * spacing).max(ov);
 
     // Evaluate the MLS height field at every grid node.
@@ -352,7 +354,10 @@ fn smooth_pass(heights: &mut [f32], valid: &[bool], nx: usize, ny: usize) {
 /// slope (tangent) or the local curvature of the data, which makes the
 /// patch easy to trim against neighboring geometry in CAD (QuickSurface
 /// style overshoot).
-pub fn fit_freeform(points: &[[f32; 3]], params: &FreeformParams) -> Result<FreeformFitData, String> {
+pub fn fit_freeform(
+    points: &[[f32; 3]],
+    params: &FreeformParams,
+) -> Result<FreeformFitData, String> {
     let (grid, xy, hh, hash) = build_fit_grid(points, params, false)?;
     let FitGrid {
         origin,
@@ -381,10 +386,7 @@ pub fn fit_freeform(points: &[[f32; 3]], params: &FreeformParams) -> Result<Free
             node_idx[idx] = positions.len() as u32;
             let i = idx % (nx + 1);
             let j = idx / (nx + 1);
-            let p = origin
-                + u * (x0 + i as f32 * gw)
-                + v * (y0 + j as f32 * gh)
-                + n * heights[idx];
+            let p = origin + u * (x0 + i as f32 * gw) + v * (y0 + j as f32 * gh) + n * heights[idx];
             positions.push(p.to_array());
         }
     }
@@ -552,12 +554,13 @@ fn eval_node(
 
     let lin = build(3).filter(|h| sane(*h));
 
-    if quadratic && neigh.len() >= 8 {
-        if let Some(hq) = build(6).filter(|h| sane(*h)) {
-            let base = lin.unwrap_or(h_mean as f64);
-            if (hq - base).abs() <= max_bend as f64 {
-                return hq as f32;
-            }
+    if quadratic
+        && neigh.len() >= 8
+        && let Some(hq) = build(6).filter(|h| sane(*h))
+    {
+        let base = lin.unwrap_or(h_mean as f64);
+        if (hq - base).abs() <= max_bend as f64 {
+            return hq as f32;
         }
     }
     if let Some(hl) = lin {
@@ -648,11 +651,16 @@ impl Hash2D {
     /// Expanding square-ring search. Fills `out` with (dist², point index)
     /// pairs, the `k` nearest found, sorted by distance. Returns the squared
     /// distance to the nearest point seen (f32::MAX if none).
-    fn query_k(&self, x: f32, y: f32, k: usize, max_rings: i32, out: &mut Vec<(f32, usize)>) -> f32 {
-        let cx = (((x - self.min.0) * self.inv_cell).floor() as i32)
-            .clamp(-1, self.cols);
-        let cy = (((y - self.min.1) * self.inv_cell).floor() as i32)
-            .clamp(-1, self.rows);
+    fn query_k(
+        &self,
+        x: f32,
+        y: f32,
+        k: usize,
+        max_rings: i32,
+        out: &mut Vec<(f32, usize)>,
+    ) -> f32 {
+        let cx = (((x - self.min.0) * self.inv_cell).floor() as i32).clamp(-1, self.cols);
+        let cy = (((y - self.min.1) * self.inv_cell).floor() as i32).clamp(-1, self.rows);
         let mut d_min2 = f32::MAX;
         let cap = max_rings.min(200);
         let mut r = 0i32;
@@ -733,6 +741,7 @@ fn median_spacing(xy: &[(f32, f32)], extent: f32) -> Option<f32> {
 
 /// RMS / max deviation of the source points against the bilinearly
 /// interpolated surface grid.
+#[allow(clippy::too_many_arguments)]
 fn deviation_stats(
     xy: &[(f32, f32)],
     hh: &[f32],
@@ -786,13 +795,7 @@ fn deviation_stats(
 /// Heuristic for selections that wrap around (are not single-valued over the
 /// fit plane): samples points and measures the height spread of their close
 /// 2D neighborhoods relative to the overall height range.
-fn fold_heuristic(
-    xy: &[(f32, f32)],
-    hh: &[f32],
-    hash: &Hash2D,
-    spacing: f32,
-    h_range: f32,
-) -> f32 {
+fn fold_heuristic(xy: &[(f32, f32)], hh: &[f32], hash: &Hash2D, spacing: f32, h_range: f32) -> f32 {
     let step = (xy.len() / 512).max(1);
     let radius = spacing * 2.5;
     let mut spreads: Vec<f32> = xy
@@ -812,11 +815,7 @@ fn fold_heuristic(
                     mx = mx.max(hh[j]);
                 }
             }
-            if mx < mn {
-                None
-            } else {
-                Some(mx - mn)
-            }
+            if mx < mn { None } else { Some(mx - mn) }
         })
         .collect();
     if spreads.is_empty() {
@@ -831,8 +830,7 @@ fn fold_heuristic(
 /// world-space line segments. Used to outline freeform patches in the
 /// viewport.
 pub fn boundary_segments(mesh: &Mesh) -> Vec<([f32; 3], [f32; 3])> {
-    let mut count: HashMap<(u32, u32), u32> =
-        HashMap::with_capacity(mesh.indices.len() * 3 / 2);
+    let mut count: HashMap<(u32, u32), u32> = HashMap::with_capacity(mesh.indices.len() * 3 / 2);
     for t in 0..mesh.triangle_count() {
         let i0 = mesh.indices[3 * t];
         let i1 = mesh.indices[3 * t + 1];
@@ -859,7 +857,10 @@ pub fn boundary_segments(mesh: &Mesh) -> Vec<([f32; 3], [f32; 3])> {
 
 /// Computes per-vertex distance (in mm) from the fitted freeform surface to the scan mesh BVH.
 /// Returns (heat_distances, mean_deviation, max_deviation).
-pub fn compute_freeform_deviation(surface: &Mesh, bvh: &crate::geom::bvh::Bvh) -> (Vec<f32>, f32, f32) {
+pub fn compute_freeform_deviation(
+    surface: &Mesh,
+    bvh: &crate::geom::bvh::Bvh,
+) -> (Vec<f32>, f32, f32) {
     if surface.positions.is_empty() {
         return (Vec::new(), 0.0, 0.0);
     }
@@ -908,50 +909,26 @@ pub fn freeform_vertex_color(
             // Green (0.0) -> Yellow (0.5) -> Red (1.0)
             if t < 0.5 {
                 let f = t / 0.5;
-                [
-                    0.1 + f * 0.9,
-                    0.9 - f * 0.05,
-                    0.2 - f * 0.2,
-                ]
+                [0.1 + f * 0.9, 0.9 - f * 0.05, 0.2 - f * 0.2]
             } else {
                 let f = (t - 0.5) / 0.5;
-                [
-                    1.0,
-                    0.85 - f * 0.80,
-                    f * 0.05,
-                ]
+                [1.0, 0.85 - f * 0.80, f * 0.05]
             }
         }
         FreeformGradient::Spectrum => {
             // Blue (0.0) -> Cyan (0.25) -> Green (0.50) -> Yellow (0.75) -> Red (1.0)
             if t < 0.25 {
                 let f = t / 0.25;
-                [
-                    0.0,
-                    0.2 + f * 0.7,
-                    1.0 - f * 0.1,
-                ]
+                [0.0, 0.2 + f * 0.7, 1.0 - f * 0.1]
             } else if t < 0.50 {
                 let f = (t - 0.25) / 0.25;
-                [
-                    f * 0.1,
-                    0.9,
-                    0.9 - f * 0.7,
-                ]
+                [f * 0.1, 0.9, 0.9 - f * 0.7]
             } else if t < 0.75 {
                 let f = (t - 0.50) / 0.25;
-                [
-                    0.1 + f * 0.9,
-                    0.9 - f * 0.05,
-                    0.2 - f * 0.2,
-                ]
+                [0.1 + f * 0.9, 0.9 - f * 0.05, 0.2 - f * 0.2]
             } else {
                 let f = (t - 0.75) / 0.25;
-                [
-                    1.0,
-                    0.85 - f * 0.80,
-                    0.05 * (1.0 - f),
-                ]
+                [1.0, 0.85 - f * 0.80, 0.05 * (1.0 - f)]
             }
         }
     };

@@ -166,6 +166,7 @@ impl Mesh {
         (b - a).cross(c - a)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sample_surface(&self, n: usize, rng: &mut Rng) -> Vec<Vec3> {
         let nt = self.triangle_count();
         if nt == 0 || n == 0 {
@@ -184,7 +185,7 @@ impl Mesh {
             let r = rng.f64() * total;
             let t = match cum.partition_point(|x| *x < r) {
                 i if i >= nt => nt - 1,
-                i => i.saturating_sub(1).max(0),
+                i => i.saturating_sub(1),
             };
             let [a, b, c] = self.triangle(t);
             let mut u = rng.f32();
@@ -201,6 +202,7 @@ impl Mesh {
     /// Splits this mesh into two meshes:
     /// - first: kept triangles (where `sel[t] == 0`)
     /// - second: hidden / extracted triangles (where `sel[t] > 0`)
+    ///
     /// Only referenced vertices are kept in each mesh, with remapped indices and preserved normals.
     pub fn split_by_selection(&self, sel: &[u8]) -> (Mesh, Mesh) {
         let nt = self.triangle_count();
@@ -278,6 +280,7 @@ impl Mesh {
     }
 
     /// Combines this mesh with another mesh into a single mesh.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn combine(&self, other: &Mesh) -> Mesh {
         if self.positions.is_empty() {
             return other.clone();
@@ -322,21 +325,70 @@ impl From<(Vec3, Vec3)> for Aabb {
     }
 }
 
-fn key_of(p: &[f32; 3]) -> [u8; 12] {
-    let mut k = [0u8; 12];
-    for (i, v) in p.iter().enumerate() {
-        let bits = if v.to_bits() == 0x8000_0000 {
-            0.0f32.to_bits()
-        } else {
-            v.to_bits()
-        };
-        k[4 * i..4 * i + 4].copy_from_slice(&bits.to_le_bytes());
-    }
-    k
+/// Bit-exact position key (negative zero folded onto zero).
+#[inline]
+fn key_of(p: &[f32; 3]) -> [u32; 3] {
+    let norm = |v: f32| if v == 0.0 { 0 } else { v.to_bits() };
+    [norm(p[0]), norm(p[1]), norm(p[2])]
 }
 
+/// Welds bit-identical corner positions into shared vertices.
+///
+/// Vertices are numbered in order of first appearance, exactly like a
+/// sequential hash-map weld would number them, but the work is done with a
+/// parallel sort so large STL files load several times faster.
 pub fn weld_corners(raw: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
-    let mut map: HashMap<[u8; 12], u32> = HashMap::with_capacity(raw.len() / 2);
+    let n = raw.len();
+    if n < 4096 {
+        return weld_corners_sequential(raw);
+    }
+    // Sort corner indices by position key; equal keys become contiguous runs.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.par_sort_unstable_by_key(|&i| key_of(&raw[i as usize]));
+
+    // Representative (= smallest corner index) of every run, scattered to
+    // each corner of the run.
+    let mut rep = vec![0u32; n];
+    {
+        let rep_cells: Vec<std::sync::atomic::AtomicU32> = (0..n)
+            .map(|_| std::sync::atomic::AtomicU32::new(0))
+            .collect();
+        // Run starts: positions where the key differs from the previous one.
+        let starts: Vec<usize> = (0..n)
+            .into_par_iter()
+            .filter(|&k| {
+                k == 0 || key_of(&raw[order[k] as usize]) != key_of(&raw[order[k - 1] as usize])
+            })
+            .collect();
+        starts.par_iter().enumerate().for_each(|(s, &start)| {
+            let end = starts.get(s + 1).copied().unwrap_or(n);
+            let run = &order[start..end];
+            let r = run.iter().copied().min().unwrap_or(run[0]);
+            for &i in run {
+                rep_cells[i as usize].store(r, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        rep.par_iter_mut()
+            .zip(rep_cells.par_iter())
+            .for_each(|(dst, cell)| *dst = cell.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // Number unique vertices by first appearance (rep[i] == i marks a first
+    // occurrence), then map every corner through its representative.
+    let mut new_index = vec![u32::MAX; n];
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n / 3);
+    for i in 0..n {
+        if rep[i] as usize == i {
+            new_index[i] = positions.len() as u32;
+            positions.push(raw[i]);
+        }
+    }
+    let indices: Vec<u32> = rep.par_iter().map(|&r| new_index[r as usize]).collect();
+    (positions, indices)
+}
+
+fn weld_corners_sequential(raw: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
+    let mut map: HashMap<[u32; 3], u32> = HashMap::with_capacity(raw.len() / 2);
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(raw.len() / 2);
     let mut indices: Vec<u32> = Vec::with_capacity(raw.len());
     for p in raw {
@@ -353,4 +405,34 @@ pub fn weld_corners(raw: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
         indices.push(idx);
     }
     (positions, indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_weld_matches_sequential_numbering() {
+        let mut rng = Rng::new(3);
+        // Many repeated positions drawn from a small set, above the parallel threshold.
+        let pool: Vec<[f32; 3]> = (0..500)
+            .map(|_| [rng.f32() * 10.0, rng.f32() * 10.0, rng.f32() * 10.0])
+            .collect();
+        let raw: Vec<[f32; 3]> = (0..9000)
+            .map(|_| pool[(rng.next_u64() % 500) as usize])
+            .collect();
+        let (pa, ia) = weld_corners(&raw);
+        let (pb, ib) = weld_corners_sequential(&raw);
+        assert_eq!(pa, pb);
+        assert_eq!(ia, ib);
+        assert!(pa.len() <= 500);
+    }
+
+    #[test]
+    fn negative_zero_welds_with_zero() {
+        let raw = vec![[0.0, 0.0, 0.0], [-0.0, 0.0, -0.0], [1.0, 0.0, 0.0]];
+        let (p, i) = weld_corners_sequential(&raw);
+        assert_eq!(p.len(), 2);
+        assert_eq!(i, vec![0, 0, 1]);
+    }
 }

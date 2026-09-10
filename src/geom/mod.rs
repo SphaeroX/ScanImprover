@@ -1,5 +1,6 @@
 pub mod alignment;
 pub mod boundary;
+pub mod bridge;
 pub mod bvh;
 pub mod distance;
 pub mod fitting;
@@ -11,4 +12,3 @@ pub mod repair;
 pub mod segment;
 pub mod symmetry;
 pub mod topology;
-pub mod bridge;

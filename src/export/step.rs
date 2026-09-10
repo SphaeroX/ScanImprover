@@ -453,7 +453,11 @@ fn knot_summary(full: &[f64]) -> (Vec<f64>, Vec<u32>) {
     let mut knots: Vec<f64> = Vec::new();
     let mut mult: Vec<u32> = Vec::new();
     for &k in full {
-        if knots.last().map(|&l| (k - l).abs() < 1e-12).unwrap_or(false) {
+        if knots
+            .last()
+            .map(|&l| (k - l).abs() < 1e-12)
+            .unwrap_or(false)
+        {
             *mult.last_mut().unwrap() += 1;
         } else {
             knots.push(k);
@@ -507,7 +511,11 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
 
     // Structural context entities (same layout as the plane/circle export).
     let ctx_id = id;
-    writeln!(out, "#{id} = APPLICATION_CONTEXT('core data for automotive mechanical design processes');").unwrap();
+    writeln!(
+        out,
+        "#{id} = APPLICATION_CONTEXT('core data for automotive mechanical design processes');"
+    )
+    .unwrap();
     id += 1;
     let _apd_id = id;
     writeln!(out, "#{id} = APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{ctx_id});").unwrap();
@@ -516,25 +524,49 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     writeln!(out, "#{id} = PRODUCT_CONTEXT('',#{ctx_id},'mechanical');").unwrap();
     id += 1;
     let prod_id = id;
-    writeln!(out, "#{id} = PRODUCT('Freeform Surface','Freeform Surface','',(#{pctx_id}));").unwrap();
+    writeln!(
+        out,
+        "#{id} = PRODUCT('Freeform Surface','Freeform Surface','',(#{pctx_id}));"
+    )
+    .unwrap();
     id += 1;
     let pdf_id = id;
-    writeln!(out, "#{id} = PRODUCT_DEFINITION_FORMATION('','',#{prod_id});").unwrap();
+    writeln!(
+        out,
+        "#{id} = PRODUCT_DEFINITION_FORMATION('','',#{prod_id});"
+    )
+    .unwrap();
     id += 1;
     let pd_id = id;
-    writeln!(out, "#{id} = PRODUCT_DEFINITION('design','',#{pdf_id},#{pctx_id});").unwrap();
+    writeln!(
+        out,
+        "#{id} = PRODUCT_DEFINITION('design','',#{pdf_id},#{pctx_id});"
+    )
+    .unwrap();
     id += 1;
     let pds_id = id;
     writeln!(out, "#{id} = PRODUCT_DEFINITION_SHAPE('','',#{pd_id});").unwrap();
     id += 1;
     let len_unit_id = id;
-    writeln!(out, "#{id} = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );").unwrap();
+    writeln!(
+        out,
+        "#{id} = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );"
+    )
+    .unwrap();
     id += 1;
     let ang_unit_id = id;
-    writeln!(out, "#{id} = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );").unwrap();
+    writeln!(
+        out,
+        "#{id} = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );"
+    )
+    .unwrap();
     id += 1;
     let solid_ang_id = id;
-    writeln!(out, "#{id} = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );").unwrap();
+    writeln!(
+        out,
+        "#{id} = ( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() );"
+    )
+    .unwrap();
     id += 1;
     let unctx_id = id;
     writeln!(
@@ -633,12 +665,7 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
             id += 1;
         }
     }
-    let (v00, v0n, vn0, vnn) = (
-        vert_id[0][0],
-        vert_id[0][1],
-        vert_id[1][0],
-        vert_id[1][1],
-    );
+    let (v00, v0n, vn0, vnn) = (vert_id[0][0], vert_id[0][1], vert_id[1][0], vert_id[1][1]);
 
     // Four boundary B-spline curves (exact surface curves; reversed control
     // point order flips the traversal direction of a symmetric knot vector).
@@ -698,7 +725,15 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
 
     // Loop, bound, face.
     let loop_id = id;
-    write!(out, "#{id} = EDGE_LOOP('',(#{e0},#{e1},#{e2},#{e3}));", e0 = edge_ids[0], e1 = edge_ids[1], e2 = edge_ids[2], e3 = edge_ids[3]).unwrap();
+    write!(
+        out,
+        "#{id} = EDGE_LOOP('',(#{e0},#{e1},#{e2},#{e3}));",
+        e0 = edge_ids[0],
+        e1 = edge_ids[1],
+        e2 = edge_ids[2],
+        e3 = edge_ids[3]
+    )
+    .unwrap();
     out.push('\n');
     id += 1;
     let bound_id = id;
@@ -718,7 +753,11 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     writeln!(out, "#{id} = OPEN_SHELL('',(#{face_id}));").unwrap();
     id += 1;
     let sbsm_id = id;
-    writeln!(out, "#{id} = SHELL_BASED_SURFACE_MODEL('Freeform Surface',(#{shell_id}));").unwrap();
+    writeln!(
+        out,
+        "#{id} = SHELL_BASED_SURFACE_MODEL('Freeform Surface',(#{shell_id}));"
+    )
+    .unwrap();
     id += 1;
     let rep_id = id;
     writeln!(
@@ -727,7 +766,11 @@ pub fn generate_freeform_step(name: &str, net: &BicubicNet) -> String {
     )
     .unwrap();
     id += 1;
-    writeln!(out, "#{id} = SHAPE_DEFINITION_REPRESENTATION(#{pds_id},#{rep_id});").unwrap();
+    writeln!(
+        out,
+        "#{id} = SHAPE_DEFINITION_REPRESENTATION(#{pds_id},#{rep_id});"
+    )
+    .unwrap();
 
     out.push_str("ENDSEC;\n");
     out.push_str("END-ISO-10303-21;\n");

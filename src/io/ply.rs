@@ -282,8 +282,8 @@ fn load_binary(body: &[u8], elems: &[Elem]) -> Result<Mesh, String> {
         } else {
             for _ in 0..elem.count {
                 for prop in &elem.props {
-                    if prop.list_count.is_some() {
-                        let len = cur.read_int(prop.list_count.unwrap())? as usize;
+                    if let Some(count_ty) = prop.list_count {
+                        let len = cur.read_int(count_ty)? as usize;
                         cur.read(len.saturating_mul(prop.ty.size()))?;
                     } else {
                         cur.read(prop.ty.size())?;
@@ -382,4 +382,35 @@ pub fn save(mesh: &Mesh) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_ply_with_extra_properties_and_quads() {
+        let text = "ply\nformat ascii 1.0\ncomment made by hand\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0 255\n1 0 0 255\n1 1 0 255\n0 1 0 255\n4 0 1 2 3\n";
+        let m = load(text.as_bytes()).unwrap();
+        assert_eq!(m.vertex_count(), 4);
+        assert_eq!(m.triangle_count(), 2);
+    }
+
+    #[test]
+    fn header_errors_are_reported() {
+        assert!(load(b"not a ply").is_err());
+        assert!(load(b"ply\nformat binary_big_endian 1.0\nend_header\n").is_err());
+        assert!(load(b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nend_header\n0 0\n").is_err());
+    }
+
+    #[test]
+    fn binary_ply_rejects_truncated_body() {
+        let m = Mesh::from_indexed(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![0, 1, 2],
+        );
+        let mut bytes = save(&m);
+        bytes.truncate(bytes.len() - 5);
+        assert!(load(&bytes).is_err());
+    }
 }

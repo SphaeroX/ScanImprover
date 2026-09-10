@@ -5,6 +5,17 @@ pub mod stl;
 use crate::mesh::Mesh;
 use std::path::Path;
 
+/// File extensions (lower case) this application can read.
+pub const SUPPORTED_EXTENSIONS: [&str; 3] = ["stl", "ply", "obj"];
+
+/// True when the path has a mesh extension this application can open.
+pub fn is_supported_mesh_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| SUPPORTED_EXTENSIONS.contains(&e.as_str()))
+}
+
 pub fn load_any(path: &Path, bytes: &[u8]) -> Result<Mesh, String> {
     let ext = path
         .extension()

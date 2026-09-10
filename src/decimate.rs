@@ -70,3 +70,17 @@ pub fn decimate(
     }
     Ok((Mesh::from_indexed(positions, new_indices), result_error))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiny_meshes_are_rejected() {
+        let m = Mesh::from_indexed(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![0, 1, 2],
+        );
+        assert!(decimate(&m, 0.5, 0.1, false).is_err());
+    }
+}

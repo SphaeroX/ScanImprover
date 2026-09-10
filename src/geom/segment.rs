@@ -2,6 +2,7 @@ use crate::geom::fitting::{eigen_3x3, fit_circle_2d, fit_plane, plane_basis};
 use crate::geom::topology::MeshTopology;
 use crate::mesh::Mesh;
 use glam::Vec3;
+use rayon::prelude::*;
 
 /// Semantic classification of a face group.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -135,14 +136,17 @@ pub fn segment_faces(
     let diag = mesh.bbox().diagonal().max(1e-9);
     let tol = (fit_tol.max(1e-6) * diag).max(1e-9);
 
-    let mut groups = Vec::with_capacity(keep.len());
     for (new_id, &r) in keep.iter().enumerate() {
-        let id = new_id as i32;
         for &t in &regions[r] {
-            group_ids[t as usize] = id;
+            group_ids[t as usize] = new_id as i32;
         }
-        groups.push(classify_region(mesh, topo, &regions[r], id, tol, diag));
     }
+    // Primitive classification of the regions is independent per region.
+    let groups: Vec<FaceGroup> = keep
+        .par_iter()
+        .enumerate()
+        .map(|(new_id, &r)| classify_region(mesh, topo, &regions[r], new_id as i32, tol, diag))
+        .collect();
     (groups, group_ids)
 }
 

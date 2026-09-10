@@ -1,17 +1,23 @@
 [package]
 name = "ScanImprover"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = { version = "1.25.2", features = ["derive"] }
-eframe = { version = "0.36.1", features = ["wgpu"] }
-egui = "=0.36.1"
-egui-wgpu = "=0.36.1"
-glam = { version = "0.33.6", features = ["bytemuck"] }
+bevy = { version = "0.19.1", default-features = false, features = ["3d", "png", "bevy_log"] }
+bevy_egui = { version = "0.42.0", default-features = false, features = ["render", "default_fonts", "manage_clipboard", "open_url"] }
+egui = "0.36.2"
+glam = "0.32"
 rayon = "1.12.0"
 rfd = "0.17.2"
-wgpu = "=30.0.1"
 
 [build-dependencies]
 cc = "1.4.5"
+
+# Bevy is unusably slow in unoptimised debug builds; keep dependencies
+# optimised while the application itself stays debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

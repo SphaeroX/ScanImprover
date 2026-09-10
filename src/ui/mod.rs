@@ -1,14 +1,20 @@
+//! egui user interface: panels, toolbar, tool sections and overlays.
+
 pub mod accordion;
 pub mod alignment;
+pub mod bridge;
+pub mod gizmo;
 pub mod object_browser;
 pub mod repair;
-pub mod bridge;
 pub mod sections;
 pub mod selection_hud;
+pub mod shortcuts;
+pub mod status_bar;
+pub mod theme;
+pub mod toolbar;
 
 use crate::app::App;
 use accordion::{accordion_body, accordion_header};
-use eframe::egui;
 
 /// Available sections in the left accordion menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,158 +27,112 @@ pub enum ToolSection {
     Decimation,
 }
 
-/// Renders the complete left panel with the accordion sections.
-pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
-    // Fixed Brush Selection tool permanently visible above accordions
-    sections::render_brush_selection(app, ui);
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
+impl ToolSection {
+    const ALL: [ToolSection; 6] = [
+        ToolSection::Symmetry,
+        ToolSection::Selection,
+        ToolSection::FaceGroups,
+        ToolSection::Coordinates,
+        ToolSection::Repair,
+        ToolSection::Decimation,
+    ];
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        // Section 1: Symmetry plane
-        let sym_badge = if app.sym.is_some() {
-            Some("Plane active")
-        } else {
-            None
-        };
-        let sym_open = app.active_section == Some(ToolSection::Symmetry);
-        if accordion_header(ui, "Symmetry plane", sym_open, sym_badge) {
-            app.active_section = if sym_open {
-                None
-            } else {
-                Some(ToolSection::Symmetry)
-            };
+    pub fn key(self) -> &'static str {
+        match self {
+            ToolSection::Symmetry => "symmetry",
+            ToolSection::Selection => "selection",
+            ToolSection::FaceGroups => "face_groups",
+            ToolSection::Coordinates => "coordinates",
+            ToolSection::Repair => "repair",
+            ToolSection::Decimation => "decimation",
         }
-        if sym_open {
-            accordion_body(ui, |ui| {
-                sections::render_symmetry(app, ui);
-            });
-        }
-        ui.add_space(3.0);
+    }
 
-        // Section 2: Face selection
-        let sel_badge_str = if app.sel_count > 0 {
-            Some(format!("{} faces", app.sel_count))
-        } else {
-            None
-        };
-        let sel_open = app.active_section == Some(ToolSection::Selection);
-        if accordion_header(ui, "Face selection", sel_open, sel_badge_str.as_deref()) {
-            app.active_section = if sel_open {
-                None
-            } else {
-                Some(ToolSection::Selection)
-            };
-        }
-        if sel_open {
-            accordion_body(ui, |ui| {
-                sections::render_selection(app, ui);
-            });
-        }
-        ui.add_space(3.0);
+    pub fn from_key(key: &str) -> Option<ToolSection> {
+        Self::ALL.into_iter().find(|s| s.key() == key.trim())
+    }
 
-        // Section 3: Face groups
-        let fg_badge_str = if !app.face_groups.is_empty() {
-            Some(format!("{} groups", app.face_groups.len()))
-        } else {
-            None
-        };
-        let fg_open = app.active_section == Some(ToolSection::FaceGroups);
-        if !fg_open {
-            app.hover_group = None;
+    fn title(self) -> &'static str {
+        match self {
+            ToolSection::Symmetry => "Symmetry plane",
+            ToolSection::Selection => "Face selection",
+            ToolSection::FaceGroups => "Face groups",
+            ToolSection::Coordinates => "Coordinate system",
+            ToolSection::Repair => "Mesh repair",
+            ToolSection::Decimation => "Decimation",
         }
-        if accordion_header(ui, "Face groups", fg_open, fg_badge_str.as_deref()) {
-            app.active_section = if fg_open {
-                None
-            } else {
-                Some(ToolSection::FaceGroups)
-            };
-        }
-        if fg_open {
-            accordion_body(ui, |ui| {
-                sections::render_face_groups(app, ui);
-            });
-        }
-        ui.add_space(3.0);
+    }
+}
 
-        // Section 4: Coordinate system
-        let coord_badge_str = if !app.undo.is_empty() {
-            Some(format!("{} undos", app.undo.len()))
-        } else {
-            None
-        };
-        let coord_open = app.active_section == Some(ToolSection::Coordinates);
-        if accordion_header(
-            ui,
-            "Coordinate system",
-            coord_open,
-            coord_badge_str.as_deref(),
-        ) {
-            app.active_section = if coord_open {
-                None
-            } else {
-                Some(ToolSection::Coordinates)
-            };
+/// Badge text shown on a collapsed section header.
+fn section_badge(app: &App, section: ToolSection) -> Option<String> {
+    match section {
+        ToolSection::Symmetry => app.sym.map(|_| "Plane active".to_string()),
+        ToolSection::Selection => (app.sel_count > 0).then(|| format!("{} faces", app.sel_count)),
+        ToolSection::FaceGroups => {
+            (!app.face_groups.is_empty()).then(|| format!("{} groups", app.face_groups.len()))
         }
-        if coord_open {
-            accordion_body(ui, |ui| {
-                sections::render_coordinates(app, ui);
-            });
+        ToolSection::Coordinates => {
+            (!app.undo.is_empty()).then(|| format!("{} undos", app.undo.len()))
         }
-        ui.add_space(3.0);
-
-        // Section 5: Mesh repair
-        let repair_badge_str = if !app.repair_holes.is_empty() {
-            Some(format!("{} holes", app.repair_holes.len()))
-        } else if let Some(h) = &app.repair_health {
-            if h.is_watertight {
+        ToolSection::Repair => {
+            if !app.repair_holes.is_empty() {
+                Some(format!("{} holes", app.repair_holes.len()))
+            } else if app.repair_health.as_ref().is_some_and(|h| h.is_watertight) {
                 Some("Watertight".to_string())
             } else {
                 None
             }
-        } else {
-            None
-        };
-        let repair_open = app.active_section == Some(ToolSection::Repair);
-        if accordion_header(
-            ui,
-            "Mesh repair",
-            repair_open,
-            repair_badge_str.as_deref(),
-        ) {
-            app.active_section = if repair_open {
-                None
-            } else {
-                Some(ToolSection::Repair)
-            };
         }
-        if repair_open {
-            accordion_body(ui, |ui| {
-                repair::render_repair(app, ui);
-            });
-        }
-        ui.add_space(3.0);
+        ToolSection::Decimation => app.preview.as_ref().map(|_| "Preview active".to_string()),
+    }
+}
 
-        // Section 6: Decimation
-        let dec_badge = if app.preview.is_some() {
-            Some("Preview active")
-        } else {
-            None
-        };
-        let dec_open = app.active_section == Some(ToolSection::Decimation);
-        if accordion_header(ui, "Decimation", dec_open, dec_badge) {
-            app.active_section = if dec_open {
-                None
-            } else {
-                Some(ToolSection::Decimation)
-            };
+/// True when a background job related to the section is running.
+fn section_busy(app: &App, section: ToolSection) -> bool {
+    match section {
+        ToolSection::Symmetry => app.sym_job.is_some(),
+        ToolSection::Selection => app.freeform_job.is_some(),
+        ToolSection::FaceGroups => app.groups_job.is_some(),
+        ToolSection::Coordinates => false,
+        ToolSection::Repair => {
+            app.analysis_job.is_some() || app.edit_job.is_some() || app.solve_job.is_some()
         }
-        if dec_open {
-            accordion_body(ui, |ui| {
-                sections::render_decimation(app, ui);
-            });
-        }
-        ui.add_space(6.0);
-    });
+        ToolSection::Decimation => app.dec_job.is_some() || app.dev_job.is_some(),
+    }
+}
+
+/// Renders the complete left panel with the accordion sections.
+pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
+    // Fixed Brush Selection tool permanently visible above accordions
+    sections::render_brush_selection(app, ui);
+    ui.add_space(6.0);
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for section in ToolSection::ALL {
+                let open = app.is_section_open(section);
+                if section == ToolSection::FaceGroups && !open {
+                    app.hover_group = None;
+                }
+                let badge = section_badge(app, section);
+                let busy = section_busy(app, section);
+                if accordion_header(ui, section.title(), open, badge.as_deref(), busy) {
+                    app.toggle_section(section);
+                }
+                if open {
+                    accordion_body(ui, |ui| match section {
+                        ToolSection::Symmetry => sections::render_symmetry(app, ui),
+                        ToolSection::Selection => sections::render_selection(app, ui),
+                        ToolSection::FaceGroups => sections::render_face_groups(app, ui),
+                        ToolSection::Coordinates => sections::render_coordinates(app, ui),
+                        ToolSection::Repair => repair::render_repair(app, ui),
+                        ToolSection::Decimation => sections::render_decimation(app, ui),
+                    });
+                }
+                ui.add_space(3.0);
+            }
+            ui.add_space(6.0);
+        });
 }

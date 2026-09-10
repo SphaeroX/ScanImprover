@@ -1,4 +1,4 @@
-use crate::geom::boundary::{find_boundary_edges, EdgeKey};
+use crate::geom::boundary::{EdgeKey, find_boundary_edges};
 use crate::mesh::{Aabb, Mesh};
 use glam::Vec3;
 use std::collections::HashMap;
@@ -160,7 +160,11 @@ pub fn detect_holes(mesh: &Mesh) -> Vec<HoleLoop> {
     }
 
     // Sort holes by perimeter descending so largest holes appear first, but preserve sequential IDs
-    holes.sort_by(|a, b| b.perimeter.partial_cmp(&a.perimeter).unwrap_or(std::cmp::Ordering::Equal));
+    holes.sort_by(|a, b| {
+        b.perimeter
+            .partial_cmp(&a.perimeter)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for (i, h) in holes.iter_mut().enumerate() {
         h.id = i + 1;
     }

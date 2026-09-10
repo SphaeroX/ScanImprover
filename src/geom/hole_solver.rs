@@ -1,24 +1,19 @@
-﻿use glam::Vec3;
 use crate::geom::fitting::{FittedCircle, FittedPlane};
 use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_fill::{
     FillDirectionMode, HoleFillConfig, HoleFillMethod, MeshPatch, generate_hole_patch,
 };
 use crate::mesh::Mesh;
+use glam::Vec3;
 
 /// Interpretation mode for a reference circle.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CircleGuideMode {
     /// Bounded circular disk and boundary rim (does not extend to infinite cylinder or plane).
+    #[default]
     DiskAndRim,
     /// Cylindrical wall surface (localized to hole vicinity).
     CylinderWall,
-}
-
-impl Default for CircleGuideMode {
-    fn default() -> Self {
-        Self::DiskAndRim
-    }
 }
 
 /// Represents a geometric reference feature that hole fills can be guided by.
@@ -178,10 +173,7 @@ pub fn distance_to_references(p: Vec3, refs: &[ReferenceGeometry]) -> f32 {
 }
 
 /// Finds the closest reference geometry to a given 3D point.
-pub fn closest_reference<'a>(
-    p: Vec3,
-    refs: &'a [ReferenceGeometry],
-) -> Option<(&'a ReferenceGeometry, f32)> {
+pub fn closest_reference(p: Vec3, refs: &[ReferenceGeometry]) -> Option<(&ReferenceGeometry, f32)> {
     if refs.is_empty() {
         return None;
     }
@@ -266,7 +258,11 @@ pub fn evaluate_patch(patch: &MeshPatch, refs: &[ReferenceGeometry]) -> PatchEva
 
     let rms = (sum_sq / sample_points.len() as f32).sqrt();
     let score = rms + 0.15 * max_dev;
-    PatchEvaluation { rms, max_dev, score }
+    PatchEvaluation {
+        rms,
+        max_dev,
+        score,
+    }
 }
 
 /// Result of running the numerical hole solver.
@@ -456,7 +452,11 @@ pub fn refine_patch_to_references(
     let boundary_pts: Vec<Vec3> = hole
         .vertices
         .iter()
-        .filter_map(|&vi| mesh.positions.get(vi as usize).map(|p| Vec3::from_array(*p)))
+        .filter_map(|&vi| {
+            mesh.positions
+                .get(vi as usize)
+                .map(|p| Vec3::from_array(*p))
+        })
         .collect();
 
     if boundary_pts.is_empty() {
@@ -479,17 +479,19 @@ pub fn refine_patch_to_references(
         let raw_t = (min_bnd_d / transition_radius).clamp(0.0, 1.0);
         let weight = raw_t * raw_t * (3.0 - 2.0 * raw_t); // Smoothstep
 
-        if weight > 1e-4 {
-            if let Some((closest_ref, _)) = closest_reference(p, refs) {
-                let proj = closest_ref.project_point(p);
-                let refined = p.lerp(proj, weight);
-                *pos = refined.to_array();
-            }
+        if weight > 1e-4
+            && let Some((closest_ref, _)) = closest_reference(p, refs)
+        {
+            let proj = closest_ref.project_point(p);
+            let refined = p.lerp(proj, weight);
+            *pos = refined.to_array();
         }
     }
 
     // Synchronize preview positions if present
-    if !patch.preview_positions.is_empty() && patch.preview_positions.len() >= patch.new_positions.len() {
+    if !patch.preview_positions.is_empty()
+        && patch.preview_positions.len() >= patch.new_positions.len()
+    {
         let offset = patch.preview_positions.len() - patch.new_positions.len();
         for (i, pos) in patch.new_positions.iter().enumerate() {
             patch.preview_positions[offset + i] = *pos;

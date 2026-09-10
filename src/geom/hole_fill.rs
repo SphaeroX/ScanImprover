@@ -162,11 +162,8 @@ pub fn apply_patch(mesh: &mut Mesh, patch: &MeshPatch) {
 }
 
 /// Fills all specified holes on the mesh in sequence using the chosen configuration.
-pub fn fill_holes(
-    mesh: &Mesh,
-    holes: &[HoleLoop],
-    config: HoleFillConfig,
-) -> Result<Mesh, String> {
+#[allow(dead_code)]
+pub fn fill_holes(mesh: &Mesh, holes: &[HoleLoop], config: HoleFillConfig) -> Result<Mesh, String> {
     let mut working = mesh.clone();
     for hole in holes {
         let patch = generate_hole_patch(&working, hole, config)?;
@@ -230,11 +227,7 @@ fn fill_planar_fan(
 // Algorithm 2: Ear Clipping (Best-Fit Plane Projection)
 // -------------------------------------------------------------------------------------------------
 
-fn fill_ear_clipping(
-    mesh: &Mesh,
-    hole: &HoleLoop,
-    _base_nv: u32,
-) -> Result<MeshPatch, String> {
+fn fill_ear_clipping(mesh: &Mesh, hole: &HoleLoop, _base_nv: u32) -> Result<MeshPatch, String> {
     let n = hole.vertices.len();
     let positions = &mesh.positions;
 
@@ -379,11 +372,7 @@ fn point_in_triangle_2d(p: glam::Vec2, a: glam::Vec2, b: glam::Vec2, c: glam::Ve
 // Algorithm 3: Minimal Area Triangulation (Barequet-Sharir DP)
 // -------------------------------------------------------------------------------------------------
 
-fn fill_minimal_area(
-    mesh: &Mesh,
-    hole: &HoleLoop,
-    _base_nv: u32,
-) -> Result<MeshPatch, String> {
+fn fill_minimal_area(mesh: &Mesh, hole: &HoleLoop, _base_nv: u32) -> Result<MeshPatch, String> {
     let n = hole.vertices.len();
     let positions = &mesh.positions;
 
@@ -421,12 +410,7 @@ fn fill_minimal_area(
     }
 
     let mut tri_indices_local: Vec<[usize; 3]> = Vec::with_capacity(n - 2);
-    fn reconstruct(
-        i: usize,
-        j: usize,
-        split: &[Vec<usize>],
-        out: &mut Vec<[usize; 3]>,
-    ) {
+    fn reconstruct(i: usize, j: usize, split: &[Vec<usize>], out: &mut Vec<[usize; 3]>) {
         if i + 1 >= j {
             return;
         }
@@ -535,6 +519,11 @@ fn fill_liepa_smooth(
         }
         refined_tris = next_tris;
     }
+
+    // 2b. Edge flipping (Liepa): the centroid refinement produces skinny
+    // triangles; flipping interior edges towards the locally Delaunay
+    // configuration restores well shaped triangles before fairing.
+    improve_triangulation(&mut refined_tris, &positions_local, n_boundary);
 
     // 3. Bulge / Curvature Application:
     // Displace newly created interior vertices along the chosen direction vector
@@ -646,17 +635,161 @@ fn fill_liepa_smooth(
 }
 
 // -------------------------------------------------------------------------------------------------
+// Triangle quality improvement (edge flips)
+// -------------------------------------------------------------------------------------------------
+
+/// Smallest interior angle of a triangle (radians).
+fn min_angle(a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let angle = |p: Vec3, q: Vec3, r: Vec3| {
+        let u = q - p;
+        let v = r - p;
+        let d = u.length() * v.length();
+        if d < 1e-20 {
+            0.0
+        } else {
+            (u.dot(v) / d).clamp(-1.0, 1.0).acos()
+        }
+    };
+    angle(a, b, c).min(angle(b, c, a)).min(angle(c, a, b))
+}
+
+/// Flips interior edges of the patch whenever the flip raises the minimum
+/// angle of the two triangles sharing the edge (the classic Delaunay-style
+/// improvement used by Liepa's hole filling). Loop edges between
+/// consecutive boundary vertices are never touched. Terminates because the
+/// sorted angle vector strictly increases with every flip.
+type EdgeUsers = std::collections::HashMap<(usize, usize), Vec<(usize, usize)>>;
+
+fn improve_triangulation(tris: &mut [[usize; 3]], pos: &[Vec3], n_boundary: usize) {
+    const MAX_PASSES: usize = 12;
+    let is_loop_edge = |a: usize, b: usize| {
+        a < n_boundary && b < n_boundary && ((a + 1) % n_boundary == b || (b + 1) % n_boundary == a)
+    };
+    for _ in 0..MAX_PASSES {
+        // Map undirected edge -> (tri index, local edge index) pairs.
+        let mut edge_map: EdgeUsers = EdgeUsers::with_capacity(tris.len() * 3);
+        for (ti, tri) in tris.iter().enumerate() {
+            for e in 0..3 {
+                let a = tri[e];
+                let b = tri[(e + 1) % 3];
+                let key = if a < b { (a, b) } else { (b, a) };
+                edge_map.entry(key).or_default().push((ti, e));
+            }
+        }
+        let mut flipped_any = false;
+        let mut touched = vec![false; tris.len()];
+        let mut edges: Vec<_> = edge_map.iter().collect();
+        edges.sort_unstable_by_key(|(k, _)| **k);
+        for (&(a, b), users) in edges {
+            if users.len() != 2 || is_loop_edge(a, b) {
+                continue;
+            }
+            let (t0, e0) = users[0];
+            let (t1, e1) = users[1];
+            if touched[t0] || touched[t1] {
+                continue;
+            }
+            // Opposite vertices of the shared edge.
+            let c = tris[t0][(e0 + 2) % 3];
+            let d = tris[t1][(e1 + 2) % 3];
+            if c == d || c == a || c == b || d == a || d == b {
+                continue;
+            }
+            // The new edge (c, d) must not already exist.
+            let new_key = if c < d { (c, d) } else { (d, c) };
+            if edge_map.contains_key(&new_key) {
+                continue;
+            }
+            let (pa, pb, pc, pd) = (pos[a], pos[b], pos[c], pos[d]);
+            let before = min_angle(pa, pb, pc).min(min_angle(pa, pb, pd));
+            let after = min_angle(pc, pd, pa).min(min_angle(pc, pd, pb));
+            if after <= before + 1e-6 {
+                continue;
+            }
+            // Reject flips that would fold the quad (normals of the new
+            // triangles must agree with the old ones).
+            let n_old = (pb - pa).cross(pc - pa) + (pa - pb).cross(pd - pb);
+            let t0_new = [tris[t0][e0], d, c];
+            let t1_new = [tris[t1][e1], c, d];
+            let n_new = (pos[t0_new[1]] - pos[t0_new[0]]).cross(pos[t0_new[2]] - pos[t0_new[0]])
+                + (pos[t1_new[1]] - pos[t1_new[0]]).cross(pos[t1_new[2]] - pos[t1_new[0]]);
+            if n_old.dot(n_new) <= 0.0 {
+                continue;
+            }
+            // Keep the original winding: t0 was (a, b, c) around edge a->b,
+            // t1 was (b, a, d). The flipped pair is (a, d, c) and (b, c, d).
+            let orient0 = tris[t0][e0];
+            let (x, y) = if orient0 == a { (a, b) } else { (b, a) };
+            tris[t0] = [x, d, c];
+            tris[t1] = [y, c, d];
+            touched[t0] = true;
+            touched[t1] = true;
+            flipped_any = true;
+        }
+        if !flipped_any {
+            break;
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
 // Geometry Utilities
 // -------------------------------------------------------------------------------------------------
 
 fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
     let n = n.normalize_or_zero();
-    let up = if n.y.abs() < 0.9 {
-        Vec3::Y
-    } else {
-        Vec3::Z
-    };
+    let up = if n.y.abs() < 0.9 { Vec3::Y } else { Vec3::Z };
     let u = n.cross(up).normalize_or_zero();
     let v = n.cross(u).normalize_or_zero();
     (u, v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_flip_raises_minimum_angle_and_keeps_orientation() {
+        // Boundary loop A -> C -> B -> D with the long chord A-B as the
+        // interior edge: flipping to C-D gives much better triangles.
+        let pos = vec![
+            Vec3::new(0.0, 0.0, 0.0),  // 0 = A
+            Vec3::new(2.0, 1.0, 0.0),  // 1 = C
+            Vec3::new(4.0, 0.0, 0.0),  // 2 = B
+            Vec3::new(2.0, -1.0, 0.0), // 3 = D
+        ];
+        let mut tris = vec![[0usize, 2, 1], [0, 3, 2]];
+        let before = tris
+            .iter()
+            .map(|t| min_angle(pos[t[0]], pos[t[1]], pos[t[2]]))
+            .fold(f32::MAX, f32::min);
+        improve_triangulation(&mut tris, &pos, 4);
+        let after = tris
+            .iter()
+            .map(|t| min_angle(pos[t[0]], pos[t[1]], pos[t[2]]))
+            .fold(f32::MAX, f32::min);
+        assert!(after > before + 0.3, "min angle {before} -> {after}");
+        // Both triangles keep a +Z normal and use the new diagonal.
+        for t in &tris {
+            let n = (pos[t[1]] - pos[t[0]]).cross(pos[t[2]] - pos[t[0]]);
+            assert!(n.z > 0.0);
+            assert!(t.contains(&1) && t.contains(&3));
+        }
+    }
+
+    #[test]
+    fn loop_edges_are_never_flipped() {
+        // A single boundary triangle plus one interior vertex (fan of 3).
+        let pos = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(2.0, 3.0, 0.0),
+            Vec3::new(2.0, 0.2, 0.0), // interior, very close to the base edge
+        ];
+        let mut tris = vec![[0usize, 1, 3], [1, 2, 3], [2, 0, 3]];
+        improve_triangulation(&mut tris, &pos, 3);
+        // Every triangle still contains the interior vertex: the boundary
+        // edges (0,1), (1,2), (2,0) were not flipped away.
+        assert!(tris.iter().all(|t| t.contains(&3)));
+    }
 }

@@ -118,11 +118,9 @@ pub fn export_freeform_dialog(freeform: &FittedFreeform) -> Result<String, Strin
         // Rebuild the fit over the full rectangle and convert it to a
         // bicubic B-spline patch. Same source points and parameters as the
         // displayed surface, so the shapes match up to the trimmed corners.
-        let grid = crate::geom::freeform::fit_freeform_grid(
-            &freeform.source_points,
-            &freeform.params,
-        )
-        .map_err(|e| format!("Could not rebuild the surface for STEP export: {e}"))?;
+        let grid =
+            crate::geom::freeform::fit_freeform_grid(&freeform.source_points, &freeform.params)
+                .map_err(|e| format!("Could not rebuild the surface for STEP export: {e}"))?;
         let net = crate::geom::freeform::bicubic_control_net(&grid);
         let content = step::generate_freeform_step(&freeform.name, &net);
         std::fs::write(&path, content)

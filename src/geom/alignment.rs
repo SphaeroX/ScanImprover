@@ -71,6 +71,58 @@ impl Default for AlignmentSlots {
     }
 }
 
+impl AlignmentSlots {
+    pub fn get_axis(&self, axis: AxisChoice) -> Option<FeatureRef> {
+        match axis {
+            AxisChoice::X => self.x,
+            AxisChoice::Y => self.y,
+            AxisChoice::Z => self.z,
+        }
+    }
+
+    pub fn set_axis(&mut self, axis: AxisChoice, feat: Option<FeatureRef>) {
+        match axis {
+            AxisChoice::X => self.x = feat,
+            AxisChoice::Y => self.y = feat,
+            AxisChoice::Z => self.z = feat,
+        }
+    }
+
+    /// The axis slot a feature is assigned to, if any.
+    pub fn axis_of(&self, feat: FeatureRef) -> Option<AxisChoice> {
+        [AxisChoice::X, AxisChoice::Y, AxisChoice::Z]
+            .into_iter()
+            .find(|&a| self.get_axis(a) == Some(feat))
+    }
+
+    pub fn any_axis_assigned(&self) -> bool {
+        self.x.is_some() || self.y.is_some() || self.z.is_some()
+    }
+
+    /// Clears the feature from every axis slot (origin untouched).
+    pub fn remove_feature_from_axes(&mut self, feat: FeatureRef) {
+        for a in [AxisChoice::X, AxisChoice::Y, AxisChoice::Z] {
+            if self.get_axis(a) == Some(feat) {
+                self.set_axis(a, None);
+            }
+        }
+    }
+
+    /// Clears the feature from every slot, including the origin.
+    pub fn remove_feature(&mut self, feat: FeatureRef) {
+        self.remove_feature_from_axes(feat);
+        let origin_uses = match (feat, self.origin) {
+            (FeatureRef::Plane(id), OriginRef::Plane(oid)) => id == oid,
+            (FeatureRef::Circle(id), OriginRef::CircleCenter(oid)) => id == oid,
+            (FeatureRef::SymmetryPlane, OriginRef::SymmetryPlane) => true,
+            _ => false,
+        };
+        if origin_uses {
+            self.origin = OriginRef::FromAssignedFeatures;
+        }
+    }
+}
+
 /// Result of an alignment computation.
 #[derive(Clone, Debug)]
 pub struct AlignmentTransform {
@@ -120,20 +172,20 @@ pub fn compute_alignment<S: AlignmentGeometrySource>(
 ) -> Result<AlignmentTransform, String> {
     // 1. Collect assigned axes
     let mut assigned = Vec::new();
-    if let Some(fx) = slots.x {
-        if let Some((dir, pt)) = source.get_feature_direction_and_point(fx) {
-            assigned.push((AxisChoice::X, fx, dir.normalize_or_zero(), pt));
-        }
+    if let Some(fx) = slots.x
+        && let Some((dir, pt)) = source.get_feature_direction_and_point(fx)
+    {
+        assigned.push((AxisChoice::X, fx, dir.normalize_or_zero(), pt));
     }
-    if let Some(fy) = slots.y {
-        if let Some((dir, pt)) = source.get_feature_direction_and_point(fy) {
-            assigned.push((AxisChoice::Y, fy, dir.normalize_or_zero(), pt));
-        }
+    if let Some(fy) = slots.y
+        && let Some((dir, pt)) = source.get_feature_direction_and_point(fy)
+    {
+        assigned.push((AxisChoice::Y, fy, dir.normalize_or_zero(), pt));
     }
-    if let Some(fz) = slots.z {
-        if let Some((dir, pt)) = source.get_feature_direction_and_point(fz) {
-            assigned.push((AxisChoice::Z, fz, dir.normalize_or_zero(), pt));
-        }
+    if let Some(fz) = slots.z
+        && let Some((dir, pt)) = source.get_feature_direction_and_point(fz)
+    {
+        assigned.push((AxisChoice::Z, fz, dir.normalize_or_zero(), pt));
     }
 
     if assigned.is_empty() {
@@ -447,5 +499,51 @@ mod tests {
             circle_c_final.length() < 1e-4,
             "Circle center should be exactly at (0,0,0)"
         );
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    #[test]
+    fn slot_helpers_track_features_and_origin() {
+        let mut slots = AlignmentSlots::default();
+        assert!(!slots.any_axis_assigned());
+        slots.set_axis(AxisChoice::Y, Some(FeatureRef::Plane(3)));
+        slots.origin = OriginRef::Plane(3);
+        assert_eq!(slots.axis_of(FeatureRef::Plane(3)), Some(AxisChoice::Y));
+        assert_eq!(slots.get_axis(AxisChoice::Y), Some(FeatureRef::Plane(3)));
+        assert!(slots.any_axis_assigned());
+        slots.remove_feature_from_axes(FeatureRef::Plane(3));
+        assert!(slots.axis_of(FeatureRef::Plane(3)).is_none());
+        assert_eq!(
+            slots.origin,
+            OriginRef::Plane(3),
+            "axes-only removal keeps the origin"
+        );
+        slots.remove_feature(FeatureRef::Plane(3));
+        assert_eq!(slots.origin, OriginRef::FromAssignedFeatures);
+    }
+
+    #[test]
+    fn alignment_with_missing_features_fails_cleanly() {
+        struct Empty;
+        impl AlignmentGeometrySource for Empty {
+            fn get_feature_direction_and_point(&self, _: FeatureRef) -> Option<(Vec3, Vec3)> {
+                None
+            }
+            fn get_feature_name(&self, _: FeatureRef) -> String {
+                String::new()
+            }
+            fn get_bbox_center(&self) -> Vec3 {
+                Vec3::ZERO
+            }
+        }
+        let slots = AlignmentSlots {
+            x: Some(FeatureRef::Plane(9)),
+            ..Default::default()
+        };
+        assert!(compute_alignment(&slots, &Empty).is_err());
     }
 }

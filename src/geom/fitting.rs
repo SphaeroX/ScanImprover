@@ -1,4 +1,5 @@
 use glam::Vec3;
+use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlaneFit {
@@ -222,11 +223,7 @@ pub fn fit_circle(points: &[[f32; 3]]) -> Option<CircleFit> {
             let min_gain = ((1e-4 * scale as f64) * (1e-4 * scale as f64)) as f32;
             let better = cyl.radial_rms <= pca.radial_rms * 0.7
                 && pca.radial_rms - cyl.radial_rms >= min_gain;
-            if better {
-                Some(cyl)
-            } else {
-                Some(pca)
-            }
+            if better { Some(cyl) } else { Some(pca) }
         }
         (None, Some(cyl)) => Some(cyl),
         (Some(pca), None) => Some(pca),
@@ -310,14 +307,15 @@ fn fit_circle_as_cylinder_section(
 ) -> Option<CircleFit> {
     let c = centroid_f64(points);
     let centroid = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
-    let stride = (points.len() + AXIS_SEARCH_MAX_POINTS - 1) / AXIS_SEARCH_MAX_POINTS;
+    let stride = points.len().div_ceil(AXIS_SEARCH_MAX_POINTS);
     let sub: Vec<[f32; 3]> = points.iter().step_by(stride).copied().collect();
 
     let mut seeds = fibonacci_directions(AXIS_GRID_SAMPLES);
     seeds.push(plane_normal);
 
+    // Scoring the candidate directions is embarrassingly parallel.
     let mut ranked: Vec<(f64, Vec3)> = seeds
-        .into_iter()
+        .into_par_iter()
         .filter_map(|d| kasa_radial_ms(&sub, centroid, d).map(|ms| (ms, d)))
         .collect();
     if ranked.is_empty() {
@@ -417,7 +415,7 @@ fn kasa_radial_ms(points: &[[f32; 3]], origin: Vec3, dir: Vec3) -> Option<f64> {
     let cx = -sol[0] * 0.5;
     let cy = -sol[1] * 0.5;
     let r2 = cx * cx + cy * cy - sol[2];
-    if !(r2 > 1e-12) {
+    if r2.is_nan() || r2 <= 1e-12 {
         return None;
     }
     let r = r2.sqrt();
@@ -452,10 +450,11 @@ fn refine_axis_dir(points: &[[f32; 3]], origin: Vec3, dir0: Vec3) -> (Vec3, f64)
             if cand.length_squared() < 0.5 {
                 continue;
             }
-            if let Some(ms) = kasa_radial_ms(points, origin, cand) {
-                if ms < best && round_best.is_none_or(|(m, _)| ms < m) {
-                    round_best = Some((ms, cand));
-                }
+            if let Some(ms) = kasa_radial_ms(points, origin, cand)
+                && ms < best
+                && round_best.is_none_or(|(m, _)| ms < m)
+            {
+                round_best = Some((ms, cand));
             }
         }
         match round_best {
@@ -584,11 +583,7 @@ fn fibonacci_directions(count: usize) -> Vec<Vec3> {
             let z = 1.0 - (2.0 * i as f64 + 1.0) / count as f64;
             let rad = (1.0 - z * z).sqrt().max(0.0);
             let a = ga * i as f64;
-            Vec3::new(
-                (rad * a.cos()) as f32,
-                (rad * a.sin()) as f32,
-                z as f32,
-            )
+            Vec3::new((rad * a.cos()) as f32, (rad * a.sin()) as f32, z as f32)
         })
         .collect()
 }

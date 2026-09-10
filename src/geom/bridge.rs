@@ -149,11 +149,8 @@ pub fn detect_selection_clusters(
     let raw_cluster_b = extract_cluster_raw(mesh, &clusters[1], topology)?;
 
     // Match the closest pair of chains between cluster A and cluster B
-    let (best_chain_a, best_chain_b) = find_closest_chain_pair(
-        mesh,
-        &raw_cluster_a.all_chains,
-        &raw_cluster_b.all_chains,
-    )?;
+    let (best_chain_a, best_chain_b) =
+        find_closest_chain_pair(mesh, &raw_cluster_a.all_chains, &raw_cluster_b.all_chains)?;
 
     let cluster_a = SelectionCluster {
         triangles: clusters[0].clone(),
@@ -395,8 +392,10 @@ pub fn generate_bridge_patch(
         .collect();
 
     // Check alignment / twist between A and B
-    let d_straight = pos_a[0].distance(pos_b[0]) + pos_a.last().unwrap().distance(*pos_b.last().unwrap());
-    let d_crossed = pos_a[0].distance(*pos_b.last().unwrap()) + pos_a.last().unwrap().distance(pos_b[0]);
+    let d_straight =
+        pos_a[0].distance(pos_b[0]) + pos_a.last().unwrap().distance(*pos_b.last().unwrap());
+    let d_crossed =
+        pos_a[0].distance(*pos_b.last().unwrap()) + pos_a.last().unwrap().distance(pos_b[0]);
 
     let mut should_reverse_b = d_crossed < d_straight;
     if config.flip_twist {
@@ -501,13 +500,14 @@ pub fn generate_bridge_patch(
                 }
             };
 
-            let final_pt = if config.method == BridgeMethod::CubicHermite && config.bulge.abs() > 0.001 {
-                let mid_norm = (na.lerp(nb, s)).normalize_or_zero();
-                let parabolic = 4.0 * s * (1.0 - s);
-                pt + mid_norm * (parabolic * config.bulge * chord_len * 0.5)
-            } else {
-                pt
-            };
+            let final_pt =
+                if config.method == BridgeMethod::CubicHermite && config.bulge.abs() > 0.001 {
+                    let mid_norm = (na.lerp(nb, s)).normalize_or_zero();
+                    let parabolic = 4.0 * s * (1.0 - s);
+                    pt + mid_norm * (parabolic * config.bulge * chord_len * 0.5)
+                } else {
+                    pt
+                };
 
             row.push(final_pt);
         }
@@ -601,13 +601,25 @@ pub fn generate_bridge_patch(
     } else {
         &final_indices_grid[1]
     };
-    let stitch_0 = stitch_boundary_row(&chain_a, &pos_a, target_row_1, &grid[1.min(segments)], config.flip_normals);
+    let stitch_0 = stitch_boundary_row(
+        &chain_a,
+        &pos_a,
+        target_row_1,
+        &grid[1.min(segments)],
+        config.flip_normals,
+    );
     new_indices.extend(stitch_0);
 
     // Stitch Row (segments - 1) to Row segments (chain_b)
     if segments > 1 {
         let prev_row = &final_indices_grid[segments - 1];
-        let stitch_end = stitch_boundary_row(prev_row, &grid[segments - 1], &chain_b, &pos_b, config.flip_normals);
+        let stitch_end = stitch_boundary_row(
+            prev_row,
+            &grid[segments - 1],
+            &chain_b,
+            &pos_b,
+            config.flip_normals,
+        );
         new_indices.extend(stitch_end);
     }
 
@@ -663,7 +675,9 @@ fn sample_chain(pts: &[Vec3], norms: &[Vec3], t_arr: &[f32], t: f32) -> (Vec3, V
     let factor = ((t - t0) / dt).clamp(0.0, 1.0);
 
     let pt = pts[idx].lerp(pts[(idx + 1).min(n - 1)], factor);
-    let norm = norms[idx].lerp(norms[(idx + 1).min(n - 1)], factor).normalize_or_zero();
+    let norm = norms[idx]
+        .lerp(norms[(idx + 1).min(n - 1)], factor)
+        .normalize_or_zero();
 
     (pt, norm)
 }

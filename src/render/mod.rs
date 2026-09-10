@@ -1,1019 +1,757 @@
-use crate::mesh::Mesh;
-use glam::{Mat4, Vec3};
-use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
+//! Bevy scene that mirrors the application state.
+//!
+//! The application (`crate::app::App`) is a Bevy resource. Every frame the
+//! egui pass records what the viewport should show (camera, overlay lines,
+//! fills, dirty flags) and [`sync_scene`] applies it to Bevy entities:
+//!
+//! * the scan mesh as two entities sharing one `Mesh` asset (front faces lit
+//!   with vertex colors, back faces in the inside color),
+//! * a wireframe line mesh,
+//! * depth-tested overlay lines and translucent fills as per-frame meshes,
+//! * always-on-top overlay lines via gizmos,
+//! * a perspective camera whose viewport follows the egui central panel,
+//!   with two camera-relative directional lights.
 
-const MESH_WGSL: &str = r#"
-struct Uniforms {
-    viewproj: mat4x4<f32>,
-    cam_pos: vec4<f32>,
-    params: vec4<f32>,
-    light1: vec4<f32>,
-    light2: vec4<f32>,
-};
-@group(0) @binding(0) var<uniform> U: Uniforms;
+use crate::app::App as ScanApp;
+use crate::mesh::Mesh as ScanMesh;
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::Viewport;
+use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::prelude::*;
+use bevy::render::render_resource::{BlendState, Face};
+use bevy::window::PrimaryWindow;
+use bevy_egui::{EguiGlobalSettings, PrimaryEguiContext};
+use glam::Vec3 as GVec3;
+use rayon::prelude::*;
 
-struct VsIn {
-    @location(0) pos: vec3<f32>,
-    @location(1) nrm: vec3<f32>,
-    @location(2) aux: vec4<f32>,
-};
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) wp: vec3<f32>,
-    @location(1) nrm: vec3<f32>,
-    @location(2) aux: vec4<f32>,
-};
-@vertex
-fn vs_main(in: VsIn) -> VsOut {
-    var out: VsOut;
-    out.pos = U.viewproj * vec4<f32>(in.pos, 1.0);
-    out.wp = in.pos;
-    out.nrm = in.nrm;
-    out.aux = in.aux;
-    return out;
-}
+/// A line-list / triangle-list vertex: position + RGBA color (sRGB, 0..1).
+pub type LineVertex = [f32; 7];
 
-fn heat_color(t: f32) -> vec3<f32> {
-    if (t < 0.25) {
-        return mix(vec3<f32>(0.10, 0.20, 0.85), vec3<f32>(0.00, 0.85, 0.90), t / 0.25);
-    }
-    if (t < 0.5) {
-        return mix(vec3<f32>(0.00, 0.85, 0.90), vec3<f32>(0.10, 0.90, 0.15), (t - 0.25) / 0.25);
-    }
-    if (t < 0.75) {
-        return mix(vec3<f32>(0.10, 0.90, 0.15), vec3<f32>(1.00, 0.80, 0.00), (t - 0.50) / 0.25);
-    }
-    return mix(vec3<f32>(1.00, 0.80, 0.00), vec3<f32>(0.95, 0.10, 0.10), (t - 0.75) / 0.25);
-}
+pub struct ScenePlugin;
 
-// Distinct hue per face group id.
-// Must stay in sync with `group_hue_color` in src/geom/segment.rs.
-fn group_color(id: f32) -> vec3<f32> {
-    let h = fract(id * 0.61803398875 + 0.04);
-    let s = 0.62;
-    let v = 1.0;
-    let c = v * s;
-    let hp = h * 6.0;
-    let x = c * (1.0 - abs(fract(hp * 0.5) * 2.0 - 1.0));
-    let m = v - c;
-    let i = i32(hp) % 6;
-    var rgb = vec3<f32>(c + m, x + m, m);
-    if (i == 1) {
-        rgb = vec3<f32>(x + m, c + m, m);
-    } else if (i == 2) {
-        rgb = vec3<f32>(m, c + m, x + m);
-    } else if (i == 3) {
-        rgb = vec3<f32>(m, x + m, c + m);
-    } else if (i == 4) {
-        rgb = vec3<f32>(x + m, m, c + m);
-    } else if (i == 5) {
-        rgb = vec3<f32>(c + m, m, x + m);
-    }
-    return rgb;
-}
-
-// Semantic type colors: code 3 = plane, 4 = cylinder, 5 = sphere, 6 = freeform.
-// Must stay in sync with `KIND_COLORS` in src/geom/segment.rs.
-fn type_color(code: f32) -> vec3<f32> {
-    if (code < 3.5) {
-        return vec3<f32>(0.30, 0.55, 0.98);
-    }
-    if (code < 4.5) {
-        return vec3<f32>(0.30, 0.82, 0.42);
-    }
-    if (code < 5.5) {
-        return vec3<f32>(0.98, 0.66, 0.28);
-    }
-    return vec3<f32>(0.78, 0.45, 0.62);
-}
-
-@fragment
-fn fs_main(in: VsOut, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
-    let v = normalize(U.cam_pos.xyz - in.wp);
-    var n = normalize(in.nrm);
-    if (!is_front) {
-        n = -n;
-    }
-    n = select(-n, n, dot(n, v) >= 0.0);
-    let l1 = normalize(U.light1.xyz);
-    let l2 = normalize(U.light2.xyz);
-    let diff = 0.15 + 0.60 * max(dot(n, l1), 0.0) + 0.35 * max(dot(n, l2), 0.0);
-    let h1 = normalize(l1 + v);
-    var spec = pow(max(dot(n, h1), 0.0), 24.0) * 0.25;
-
-    var col = vec3<f32>(0.72, 0.74, 0.78);
-    // Backface / inside coloring: soft light yellow with subtle diagonal pattern
-    var back_col = vec3<f32>(0.93, 0.86, 0.48);
-    if (!is_front) {
-        // Subtle diagonal hatching pattern (~16px period)
-        let pat = 0.5 + 0.5 * sin((in.pos.x + in.pos.y) * 0.3927);
-        back_col = mix(vec3<f32>(0.93, 0.86, 0.48), vec3<f32>(0.82, 0.72, 0.32), pat * 0.28);
-        col = back_col;
-        spec = spec * 0.15;
-    }
-
-    // Face group coloring: aux.z >= 0 = distinct hue id,
-    // <= -3.0 = type code, -2.0 = group boundary seam, -1.0 = ungrouped.
-    if (U.params.z > 0.5 && in.aux.z >= 0.0) {
-        let gcol = group_color(in.aux.z);
-        if (is_front) {
-            col = gcol;
-        } else {
-            col = mix(gcol * 0.65, back_col, 0.45);
-        }
-    } else if (U.params.z > 0.5 && in.aux.z <= -3.0) {
-        let tcol = type_color(-in.aux.z);
-        if (is_front) {
-            col = tcol;
-        } else {
-            col = mix(tcol * 0.65, back_col, 0.45);
-        }
-    } else if (U.params.z > 0.5 && in.aux.z <= -2.5) {
-        col = vec3<f32>(0.16, 0.17, 0.21);
-    }
-    if (U.params.x > 0.5 && in.aux.y >= 0.0) {
-        let hcol = heat_color(clamp(in.aux.y * U.params.y, 0.0, 1.0));
-        if (is_front) {
-            col = hcol;
-        } else {
-            col = mix(hcol * 0.70, back_col, 0.35);
-        }
-    }
-    if (U.params.z > 0.5 && U.params.w >= 0.0 && abs(in.aux.w - U.params.w) < 0.5) {
-        col = mix(col, vec3<f32>(1.0, 1.0, 1.0), 0.45);
-    }
-    if (in.aux.x > 0.75) {
-        col = mix(col, vec3<f32>(1.0, 0.45, 0.10), 0.55);
-    } else if (in.aux.x > 0.25) {
-        col = mix(col, vec3<f32>(1.0, 0.75, 0.15), 0.50);
-    } else if (in.aux.x < -0.25) {
-        col = mix(col, vec3<f32>(1.0, 0.20, 0.20), 0.55);
-    }
-    return vec4<f32>(col * diff + vec3<f32>(spec), 1.0);
-}
-"#;
-
-const LINE_WGSL: &str = r#"
-struct Uniforms {
-    viewproj: mat4x4<f32>,
-    cam_pos: vec4<f32>,
-    params: vec4<f32>,
-    light1: vec4<f32>,
-    light2: vec4<f32>,
-};
-@group(0) @binding(0) var<uniform> U: Uniforms;
-
-struct VsIn {
-    @location(0) pos: vec3<f32>,
-    @location(1) color: vec4<f32>,
-};
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-@vertex
-fn vs_main(in: VsIn) -> VsOut {
-    var out: VsOut;
-    out.pos = U.viewproj * vec4<f32>(in.pos, 1.0);
-    out.color = in.color;
-    return out;
-}
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;
-
-const BLIT_WGSL: &str = r#"
-@group(0) @binding(0) var samp: sampler;
-@group(0) @binding(1) var tex: texture_2d<f32>;
-
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    var p = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-    );
-    let xy = p[vi];
-    var out: VsOut;
-    out.pos = vec4<f32>(xy, 0.0, 1.0);
-    out.uv = vec2<f32>((xy.x + 1.0) * 0.5, (1.0 - xy.y) * 0.5);
-    return out;
-}
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(tex, samp, in.uv);
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    viewproj: [[f32; 4]; 4],
-    cam_pos: [f32; 4],
-    params: [f32; 4],
-    light1: [f32; 4],
-    light2: [f32; 4],
-}
-
-struct MeshGpu {
-    vb: wgpu::Buffer,
-    ib: wgpu::Buffer,
-    tri_count: u32,
-    vert_count: u32,
-}
-
-struct DynBuf {
-    buf: Option<wgpu::Buffer>,
-    cap: u64,
-}
-
-impl DynBuf {
-    fn new() -> DynBuf {
-        DynBuf { buf: None, cap: 0 }
-    }
-
-    fn ensure(&mut self, device: &wgpu::Device, size: u64, label: &str) {
-        if self.cap < size {
-            self.cap = size.max(4096).next_power_of_two();
-            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: self.cap,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
+impl Plugin for ScenePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_scene)
+            .add_systems(PostUpdate, sync_scene);
     }
 }
 
-struct Offscreen {
-    view: wgpu::TextureView,
-    depth: wgpu::TextureView,
-    bind: wgpu::BindGroup,
-    w: u32,
-    h: u32,
+#[derive(Component)]
+struct ViewCamera;
+
+/// Handles and entities of the scene objects driven by the application.
+#[derive(Resource)]
+struct SceneEntities {
+    mesh: Handle<Mesh>,
+    front: Entity,
+    back: Entity,
+    wire: Entity,
+    wire_mesh: Handle<Mesh>,
+    lines: Entity,
+    lines_mesh: Handle<Mesh>,
+    fills: Entity,
+    fills_mesh: Handle<Mesh>,
+    /// Mesh generation currently uploaded; `u64::MAX` = nothing.
+    mesh_generation: u64,
+    /// Crease-split render vertex -> source mesh vertex.
+    render_to_mesh: Vec<u32>,
+    /// Triangle corners as render vertex indices (all triangles).
+    render_indices: Vec<u32>,
+    /// Content of the overlay meshes currently uploaded.
+    last_lines: Vec<LineVertex>,
+    last_fills: Vec<LineVertex>,
+    wire_valid: bool,
 }
 
-pub struct GpuState {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    uniform: wgpu::Buffer,
-    uniform_bind: wgpu::BindGroup,
-    mesh_pipe: wgpu::RenderPipeline,
-    line_pipe: wgpu::RenderPipeline,
-    line_pipe_nodepth: wgpu::RenderPipeline,
-    fill_pipe: wgpu::RenderPipeline,
-    blit_pipe: wgpu::RenderPipeline,
-    blit_layout: wgpu::BindGroupLayout,
-    blit_sampler: wgpu::Sampler,
-    mesh: Option<MeshGpu>,
-    aux: DynBuf,
-    wire: DynBuf,
-    wire_verts: u32,
-    lines_depth: DynBuf,
-    lines_depth_verts: u32,
-    lines_overlay: DynBuf,
-    lines_overlay_verts: u32,
-    fills: DynBuf,
-    fill_verts: u32,
-    off: Option<Offscreen>,
-    view_px: (u32, u32),
-    show_mesh: bool,
-    show_wireframe: bool,
-}
+fn setup_scene(
+    mut commands: Commands,
+    mut egui_settings: ResMut<EguiGlobalSettings>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut gizmo_config: ResMut<GizmoConfigStore>,
+    scan: Res<ScanApp>,
+) {
+    // The egui context gets its own camera (spawned below) instead of the
+    // scene camera, so the UI covers the whole window while the 3D view is
+    // restricted to the central panel.
+    egui_settings.auto_create_primary_context = false;
 
-impl GpuState {
-    pub fn new(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        target_format: wgpu::TextureFormat,
-    ) -> GpuState {
-        let bglayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scanimprover-uniform-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("scanimprover-uniform"),
-            size: 192,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scanimprover-uniform-bind"),
-            layout: &bglayout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
-        });
+    let (config, _) = gizmo_config.config_mut::<DefaultGizmoConfigGroup>();
+    config.line.width = 1.5;
+    // Overlay gizmos always draw on top of the geometry.
+    config.depth_bias = -1.0;
 
-        let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scanimprover-pipe-layout"),
-            bind_group_layouts: &[Some(&bglayout)],
-            immediate_size: 0,
-        });
+    let mesh = meshes.add(fill_mesh(&[[0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 3]));
+    let dummy_line = [[0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 2];
+    let dummy_tri = [[0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 3];
+    let wire_mesh = meshes.add(line_mesh(&dummy_line));
+    let lines_mesh = meshes.add(line_mesh(&dummy_line));
+    let fills_mesh = meshes.add(fill_mesh(&dummy_tri));
 
-        let mesh_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scanimprover-mesh"),
-            source: wgpu::ShaderSource::Wgsl(MESH_WGSL.into()),
-        });
-        let line_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scanimprover-line"),
-            source: wgpu::ShaderSource::Wgsl(LINE_WGSL.into()),
-        });
-        let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scanimprover-blit"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
-        });
+    let front_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.62,
+        metallic: 0.0,
+        reflectance: 0.35,
+        cull_mode: Some(Face::Back),
+        ..default()
+    });
+    let back_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.93, 0.86, 0.48),
+        perceptual_roughness: 0.8,
+        metallic: 0.0,
+        reflectance: 0.2,
+        cull_mode: Some(Face::Front),
+        double_sided: true,
+        ..default()
+    });
+    let overlay_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        double_sided: true,
+        ..default()
+    });
 
-        let opaque = wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            blend: Some(wgpu::BlendState::REPLACE),
-            write_mask: wgpu::ColorWrites::ALL,
-        };
-        let alpha = wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-            write_mask: wgpu::ColorWrites::ALL,
-        };
-        let depth_rw = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: Default::default(),
-        };
-        let depth_ro = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: Default::default(),
-        };
+    let front = commands
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(front_material),
+            Visibility::Hidden,
+        ))
+        .id();
+    let back = commands
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(back_material),
+            Visibility::Hidden,
+        ))
+        .id();
+    let wire = commands
+        .spawn((
+            Mesh3d(wire_mesh.clone()),
+            MeshMaterial3d(overlay_material.clone()),
+            Visibility::Hidden,
+        ))
+        .id();
+    let lines = commands
+        .spawn((
+            Mesh3d(lines_mesh.clone()),
+            MeshMaterial3d(overlay_material.clone()),
+            Visibility::Hidden,
+        ))
+        .id();
+    let fills = commands
+        .spawn((
+            Mesh3d(fills_mesh.clone()),
+            MeshMaterial3d(overlay_material),
+            Visibility::Hidden,
+        ))
+        .id();
 
-        let geom_layout = wgpu::VertexBufferLayout {
-            array_stride: 24,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        };
-        let aux_layout = wgpu::VertexBufferLayout {
-            array_stride: 16,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Float32x4,
-            }],
-        };
-        let line_layout = wgpu::VertexBufferLayout {
-            array_stride: 28,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        };
-
-        let mesh_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scanimprover-mesh-pipe"),
-            layout: Some(&pipe_layout),
-            vertex: wgpu::VertexState {
-                module: &mesh_module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(geom_layout.clone()), Some(aux_layout.clone())],
+    // Scene camera with camera-relative key and fill lights.
+    let cam = &scan.camera;
+    commands
+        .spawn((
+            ViewCamera,
+            Camera3d::default(),
+            Camera {
+                order: 0,
+                clear_color: ClearColorConfig::Custom(bg_color()),
+                ..default()
             },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(depth_rw.clone()),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &mesh_module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(opaque.clone())],
+            Projection::Perspective(PerspectiveProjection {
+                fov: cam.fov_y,
+                aspect_ratio: 1.5,
+                near: 0.1,
+                far: 10_000.0,
+                ..default()
             }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let make_line_pipe = |depth: Option<wgpu::DepthStencilState>,
-                              target: wgpu::ColorTargetState| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("scanimprover-line-pipe"),
-                layout: Some(&pipe_layout),
-                vertex: wgpu::VertexState {
-                    module: &line_module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(line_layout.clone())],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
-                    ..Default::default()
-                },
-                depth_stencil: depth,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &line_module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(target)],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-
-        let depth_always = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: wgpu::StencilState::default(),
-            bias: Default::default(),
-        };
-
-        let line_pipe = make_line_pipe(Some(depth_ro.clone()), opaque.clone());
-        let line_pipe_nodepth = make_line_pipe(Some(depth_always), opaque.clone());
-
-        let fill_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scanimprover-fill-pipe"),
-            layout: Some(&pipe_layout),
-            vertex: wgpu::VertexState {
-                module: &line_module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(line_layout.clone())],
+            camera_transform(cam),
+            Msaa::Sample4,
+            Tonemapping::None,
+            AmbientLight {
+                color: Color::WHITE,
+                brightness: 650.0,
+                affects_lightmapped_meshes: true,
             },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: Some(depth_ro),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &line_module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(alpha)],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scanimprover-blit-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        ))
+        .with_children(|parent| {
+            // Camera space: +X right, +Y up, +Z back (towards the viewer).
+            for (dir, lux) in [
+                (Vec3::new(0.35, 0.55, 0.75), 2600.0),
+                (Vec3::new(-0.40, -0.30, 0.45), 1300.0),
+            ] {
+                parent.spawn((
+                    DirectionalLight {
+                        illuminance: lux,
+                        ..default()
                     },
-                    count: None,
-                },
-            ],
-        });
-        let blit_pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scanimprover-blit-pipe-layout"),
-            bind_group_layouts: &[Some(&blit_layout)],
-            immediate_size: 0,
-        });
-        let blit_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scanimprover-blit-pipe"),
-            layout: Some(&blit_pipe_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("scanimprover-blit-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+                    Transform::default().looking_to(-dir.normalize(), Vec3::Y),
+                ));
+            }
         });
 
-        GpuState {
-            device,
-            queue,
-            uniform,
-            uniform_bind,
-            mesh_pipe,
-            line_pipe,
-            line_pipe_nodepth,
-            fill_pipe,
-            blit_pipe,
-            blit_layout,
-            blit_sampler,
-            mesh: None,
-            aux: DynBuf::new(),
-            wire: DynBuf::new(),
-            wire_verts: 0,
-            lines_depth: DynBuf::new(),
-            lines_depth_verts: 0,
-            lines_overlay: DynBuf::new(),
-            lines_overlay_verts: 0,
-            fills: DynBuf::new(),
-            fill_verts: 0,
-            off: None,
-            view_px: (1, 1),
-            show_mesh: true,
-            show_wireframe: false,
+    // UI camera: draws egui over the full window on top of the scene.
+    commands.spawn((
+        PrimaryEguiContext,
+        Camera3d::default(),
+        RenderLayers::none(),
+        Camera {
+            order: 1,
+            output_mode: bevy::camera::CameraOutputMode::Write {
+                blend_state: Some(BlendState::ALPHA_BLENDING),
+                clear_color: ClearColorConfig::None,
+            },
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+        Msaa::Off,
+        Tonemapping::None,
+    ));
+
+    commands.insert_resource(SceneEntities {
+        mesh,
+        front,
+        back,
+        wire,
+        wire_mesh,
+        lines,
+        lines_mesh,
+        fills,
+        fills_mesh,
+        mesh_generation: u64::MAX,
+        render_to_mesh: Vec::new(),
+        render_indices: Vec::new(),
+        last_lines: Vec::new(),
+        last_fills: Vec::new(),
+        wire_valid: false,
+    });
+}
+
+fn bg_color() -> Color {
+    let (_, bottom) = crate::ui::theme::viewport_gradient();
+    Color::srgb(bottom[0], bottom[1], bottom[2])
+}
+
+fn camera_transform(cam: &crate::camera::Camera) -> Transform {
+    let eye = cam.eye();
+    let up = cam.up();
+    Transform::from_translation(Vec3::new(eye.x, eye.y, eye.z)).looking_at(
+        Vec3::new(cam.target.x, cam.target.y, cam.target.z),
+        Vec3::new(up.x, up.y, up.z),
+    )
+}
+
+fn sync_scene(
+    mut scan: ResMut<ScanApp>,
+    mut scene: ResMut<SceneEntities>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cameras: Query<(&mut Camera, &mut Transform, &mut Projection), With<ViewCamera>>,
+    mut visibility: Query<&mut Visibility>,
+    mut gizmos: Gizmos,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
+) {
+    let scan = &mut *scan;
+    let has_mesh = scan.has_mesh();
+
+    // --- Mesh geometry / visibility / colors ---------------------------
+    if scan.mesh_dirty {
+        if let Some(m) = scan.display().cloned() {
+            if scene.mesh_generation != scan.mesh_generation {
+                let split = CreaseSplit::build(&m, CREASE_COS);
+                let mut mesh = Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::default(),
+                );
+                let positions: Vec<[f32; 3]> = split
+                    .render_to_mesh
+                    .par_iter()
+                    .map(|&v| m.positions[v as usize])
+                    .collect();
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, split.normals.clone());
+                let colors = expand(&split.render_to_mesh, &scan.vertex_colors());
+                mesh.insert_attribute(
+                    Mesh::ATTRIBUTE_COLOR,
+                    VertexAttributeValues::Float32x4(colors),
+                );
+                mesh.insert_indices(Indices::U32(visible_indices(
+                    &split.indices,
+                    Some(&scan.hidden_mask),
+                )));
+                let _ = meshes.insert(&scene.mesh, mesh);
+                scene.render_to_mesh = split.render_to_mesh;
+                scene.render_indices = split.indices;
+                scene.mesh_generation = scan.mesh_generation;
+                scan.aux_dirty = false;
+                scan.sel_dirty = false;
+            } else if let Some(mut mesh) = meshes.get_mut(&scene.mesh) {
+                let indices = visible_indices(&scene.render_indices, Some(&scan.hidden_mask));
+                mesh.insert_indices(Indices::U32(indices));
+            }
         }
+        scan.mesh_dirty = false;
+        scan.wire_dirty = true;
+    }
+    if (scan.aux_dirty || scan.sel_dirty)
+        && has_mesh
+        && scene.mesh_generation == scan.mesh_generation
+    {
+        if let Some(mut mesh) = meshes.get_mut(&scene.mesh) {
+            let colors = expand(&scene.render_to_mesh, &scan.vertex_colors());
+            mesh.insert_attribute(
+                Mesh::ATTRIBUTE_COLOR,
+                VertexAttributeValues::Float32x4(colors),
+            );
+        }
+        scan.aux_dirty = false;
+        scan.sel_dirty = false;
     }
 
-    pub fn upload_mesh(&mut self, mesh: &Mesh, hidden_mask: Option<&[bool]>) {
-        let nv = mesh.positions.len();
-        let mut geom: Vec<[f32; 6]> = Vec::with_capacity(nv);
-        for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
-            geom.push([p[0], p[1], p[2], n[0], n[1], n[2]]);
+    // --- Wireframe -------------------------------------------------------
+    if scan.wire_dirty && scan.show_wireframe {
+        if let Some(m) = scan.display().cloned() {
+            if m.triangle_count() > crate::app::WIREFRAME_MAX_TRIS {
+                scan.status = format!(
+                    "Wireframe disabled: mesh too dense (> {}k triangles).",
+                    crate::app::WIREFRAME_MAX_TRIS / 1000
+                );
+                scene.wire_valid = false;
+            } else {
+                let lines = wireframe_lines(&m, Some(&scan.hidden_mask), [0.25, 0.28, 0.33, 0.85]);
+                scene.wire_valid = lines.len() >= 2;
+                if scene.wire_valid {
+                    let _ = meshes.insert(&scene.wire_mesh, line_mesh(&lines));
+                }
+            }
         }
-        let vb = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("scanimprover-mesh-vb"),
-                contents: bytemuck::cast_slice(&geom),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        scan.wire_dirty = false;
+    }
 
-        let indices: Vec<u32> = if let Some(mask) = hidden_mask {
-            let mut vis = Vec::with_capacity(mesh.indices.len());
-            for (t, chunk) in mesh.indices.chunks_exact(3).enumerate() {
+    // --- Per-frame overlays ---------------------------------------------
+    // Meshes are only replaced when their content changed, and never with
+    // empty geometry (the entity is hidden instead).
+    let frame = &scan.frame;
+    if frame.depth_lines.len() >= 2 && frame.depth_lines != scene.last_lines {
+        let _ = meshes.insert(&scene.lines_mesh, line_mesh(&frame.depth_lines));
+        scene.last_lines = frame.depth_lines.clone();
+    }
+    if frame.fills.len() >= 3 && frame.fills != scene.last_fills {
+        let _ = meshes.insert(&scene.fills_mesh, fill_mesh(&frame.fills));
+        scene.last_fills = frame.fills.clone();
+    }
+    for pair in frame.overlay_lines.chunks_exact(2) {
+        let a = Vec3::new(pair[0][0], pair[0][1], pair[0][2]);
+        let b = Vec3::new(pair[1][0], pair[1][1], pair[1][2]);
+        gizmos.line(
+            a,
+            b,
+            Color::srgba(pair[0][3], pair[0][4], pair[0][5], pair[0][6]),
+        );
+    }
+
+    let set_vis = |visibility: &mut Query<&mut Visibility>, e: Entity, on: bool| {
+        if let Ok(mut v) = visibility.get_mut(e) {
+            let want = if on {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *v != want {
+                *v = want;
+            }
+        }
+    };
+    let show_mesh = has_mesh && frame.show_mesh && scene.mesh_generation == scan.mesh_generation;
+    set_vis(&mut visibility, scene.front, show_mesh);
+    set_vis(&mut visibility, scene.back, show_mesh);
+    set_vis(
+        &mut visibility,
+        scene.wire,
+        has_mesh && frame.show_wireframe && scene.wire_valid,
+    );
+    set_vis(&mut visibility, scene.lines, frame.depth_lines.len() >= 2);
+    set_vis(&mut visibility, scene.fills, frame.fills.len() >= 3);
+
+    // --- Camera ------------------------------------------------------------
+    if let Ok((mut camera, mut transform, mut projection)) = cameras.single_mut() {
+        camera.clear_color = ClearColorConfig::Custom(bg_color());
+        if let Some(window) = window.as_deref() {
+            let scale = window.scale_factor();
+            let r = frame.viewport_rect;
+            let win = window.physical_size();
+            if win.x > 0 && win.y > 0 && r.width() > 0.0 && r.height() > 0.0 {
+                let x = ((r.min.x * scale).round().max(0.0) as u32).min(win.x - 1);
+                let y = ((r.min.y * scale).round().max(0.0) as u32).min(win.y - 1);
+                let w = ((r.width() * scale).round().max(1.0) as u32).min(win.x - x);
+                let h = ((r.height() * scale).round().max(1.0) as u32).min(win.y - y);
+                camera.viewport = Some(Viewport {
+                    physical_position: UVec2::new(x, y),
+                    physical_size: UVec2::new(w.max(1), h.max(1)),
+                    ..default()
+                });
+            }
+        }
+        let cam = &scan.camera;
+        *transform = camera_transform(cam);
+        *projection = Projection::Perspective(PerspectiveProjection {
+            fov: cam.fov_y,
+            aspect_ratio: cam.aspect.max(1e-3),
+            near: cam.near,
+            far: cam.far,
+            ..default()
+        });
+    }
+}
+
+/// Expands a per-mesh-vertex array to the crease-split render vertices.
+fn expand<T: Copy + Send + Sync>(render_to_mesh: &[u32], per_vertex: &[T]) -> Vec<T> {
+    render_to_mesh
+        .par_iter()
+        .map(|&mv| per_vertex[mv as usize])
+        .collect()
+}
+
+/// Builds a line-list mesh from position + sRGB color vertices.
+fn line_mesh(lines: &[LineVertex]) -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+    let n = lines.len() / 2 * 2;
+    let positions: Vec<[f32; 3]> = lines[..n].iter().map(|v| [v[0], v[1], v[2]]).collect();
+    let colors: Vec<[f32; 4]> = lines[..n]
+        .iter()
+        .map(|v| srgb_to_linear([v[3], v[4], v[5], v[6]]))
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        VertexAttributeValues::Float32x4(colors),
+    );
+    mesh
+}
+
+/// Builds a triangle-list mesh from position + sRGB color vertices.
+fn fill_mesh(tris: &[LineVertex]) -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    let n = tris.len() / 3 * 3;
+    let positions: Vec<[f32; 3]> = tris[..n].iter().map(|v| [v[0], v[1], v[2]]).collect();
+    let colors: Vec<[f32; 4]> = tris[..n]
+        .iter()
+        .map(|v| srgb_to_linear([v[3], v[4], v[5], v[6]]))
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        VertexAttributeValues::Float32x4(colors),
+    );
+    mesh
+}
+
+/// Converts an sRGB color (as used by the overlay builders and the UI) to
+/// the linear RGBA Bevy expects in vertex colors.
+pub fn srgb_to_linear(c: [f32; 4]) -> [f32; 4] {
+    let lin = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [lin(c[0]), lin(c[1]), lin(c[2]), c[3].clamp(0.0, 1.0)]
+}
+
+/// Index buffer content with hidden triangles removed.
+pub fn visible_indices(indices: &[u32], hidden_mask: Option<&[bool]>) -> Vec<u32> {
+    match hidden_mask {
+        Some(mask) if mask.iter().any(|&h| h) => {
+            let mut vis = Vec::with_capacity(indices.len());
+            for (t, chunk) in indices.chunks_exact(3).enumerate() {
                 if t < mask.len() && mask[t] {
                     continue;
                 }
                 vis.extend_from_slice(chunk);
             }
             vis
-        } else {
-            mesh.indices.clone()
-        };
-
-        let tri_count = (indices.len() / 3) as u32;
-
-        let ib = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("scanimprover-mesh-ib"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        let aux_data = vec![[0.0f32, 0.0, -1.0, -1.0]; nv];
-        self.aux
-            .ensure(&self.device, (nv * 16) as u64, "scanimprover-aux");
-        self.queue.write_buffer(
-            self.aux.buf.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&aux_data),
-        );
-        self.mesh = Some(MeshGpu {
-            vb,
-            ib,
-            tri_count,
-            vert_count: nv as u32,
-        });
-        self.wire.buf = None;
-        self.wire.cap = 0;
-        self.wire_verts = 0;
+        }
+        _ => indices.to_vec(),
     }
+}
 
-    pub fn upload_aux(&mut self, aux: &[[f32; 4]]) {
-        let nv = self
-            .mesh
-            .as_ref()
-            .map(|m| m.vert_count as usize)
-            .unwrap_or(0);
-        if aux.len() != nv {
-            return;
-        }
-        if let Some(buf) = self.aux.buf.as_ref() {
-            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(aux));
-        }
-    }
+/// Unique mesh edges as line-list vertices (parallel sort based dedupe).
+pub fn wireframe_lines(
+    mesh: &ScanMesh,
+    hidden_mask: Option<&[bool]>,
+    color: [f32; 4],
+) -> Vec<LineVertex> {
+    let nt = mesh.triangle_count();
+    let mut keys: Vec<u64> = (0..nt)
+        .into_par_iter()
+        .filter(|&t| !hidden_mask.is_some_and(|m| t < m.len() && m[t]))
+        .flat_map_iter(|t| {
+            let i0 = mesh.indices[3 * t];
+            let i1 = mesh.indices[3 * t + 1];
+            let i2 = mesh.indices[3 * t + 2];
+            [edge_key(i0, i1), edge_key(i1, i2), edge_key(i2, i0)]
+        })
+        .collect();
+    keys.par_sort_unstable();
+    keys.dedup();
+    keys.into_par_iter()
+        .flat_map_iter(|k| {
+            let a = (k >> 32) as usize;
+            let b = (k & 0xffff_ffff) as usize;
+            let pa = mesh.positions[a];
+            let pb = mesh.positions[b];
+            [
+                [pa[0], pa[1], pa[2], color[0], color[1], color[2], color[3]],
+                [pb[0], pb[1], pb[2], color[0], color[1], color[2], color[3]],
+            ]
+        })
+        .collect()
+}
 
-    pub fn upload_wireframe(
-        &mut self,
-        mesh: &Mesh,
-        max_tris: usize,
-        hidden_mask: Option<&[bool]>,
-    ) -> bool {
-        if mesh.triangle_count() > max_tris {
-            self.wire_verts = 0;
-            self.wire.buf = None;
-            self.wire.cap = 0;
-            return false;
-        }
-        let mut edges = std::collections::HashSet::with_capacity(mesh.indices.len() * 2);
-        let mut data: Vec<[f32; 7]> = Vec::with_capacity(mesh.indices.len() * 2);
-        let push = |a: usize,
-                    b: usize,
-                    data: &mut Vec<[f32; 7]>,
-                    mesh: &Mesh,
-                    edges: &mut std::collections::HashSet<(u32, u32)>| {
-            let key = if a < b {
-                (a as u32, b as u32)
-            } else {
-                (b as u32, a as u32)
+#[inline]
+fn edge_key(a: u32, b: u32) -> u64 {
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    ((lo as u64) << 32) | hi as u64
+}
+
+/// Cosine of the crease angle (30 degrees): adjacent faces meeting at a
+/// sharper angle do not share a shading normal.
+pub const CREASE_COS: f32 = 0.866;
+
+/// Render vertices with normals split at crease edges.
+///
+/// For every mesh vertex the incident faces are grouped into "smoothing
+/// groups": faces whose normals are within the crease angle of each other
+/// (transitively) share one render vertex whose normal is the area-weighted
+/// average of the group. Welded CAD-like meshes therefore get crisp edges
+/// while smooth scan surfaces keep smooth shading.
+pub struct CreaseSplit {
+    pub render_to_mesh: Vec<u32>,
+    pub normals: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+}
+
+/// Per mesh vertex: the averaged normal of each smooth group and, per
+/// incident corner, `(triangle, group)`.
+type VertexGroups = (Vec<[f32; 3]>, Vec<(u32, u32)>);
+
+impl CreaseSplit {
+    pub fn build(mesh: &ScanMesh, crease_cos: f32) -> CreaseSplit {
+        let nv = mesh.positions.len();
+        let nt = mesh.triangle_count();
+        if nv == 0 || nt == 0 {
+            return CreaseSplit {
+                render_to_mesh: (0..nv as u32).collect(),
+                normals: mesh.normals.clone(),
+                indices: mesh.indices.clone(),
             };
-            if edges.insert(key) {
-                let pa = mesh.positions[a];
-                let pb = mesh.positions[b];
-                data.push([pa[0], pa[1], pa[2], 0.25, 0.28, 0.33, 1.0]);
-                data.push([pb[0], pb[1], pb[2], 0.25, 0.28, 0.33, 1.0]);
-            }
-        };
-        for t in 0..mesh.triangle_count() {
-            if let Some(mask) = hidden_mask {
-                if t < mask.len() && mask[t] {
-                    continue;
-                }
-            }
-            let i0 = mesh.indices[3 * t] as usize;
-            let i1 = mesh.indices[3 * t + 1] as usize;
-            let i2 = mesh.indices[3 * t + 2] as usize;
-            push(i0, i1, &mut data, mesh, &mut edges);
-            push(i1, i2, &mut data, mesh, &mut edges);
-            push(i2, i0, &mut data, mesh, &mut edges);
         }
-        self.wire
-            .ensure(&self.device, (data.len() * 28) as u64, "scanimprover-wire");
-        if let Some(buf) = self.wire.buf.as_ref() {
-            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
+        // Area-weighted face normals.
+        let face_n: Vec<GVec3> = (0..nt)
+            .into_par_iter()
+            .map(|t| {
+                let [a, b, c] = mesh.triangle(t);
+                (b - a).cross(c - a)
+            })
+            .collect();
+        // CSR vertex -> incident corners (triangle * 3 + k).
+        let mut offsets = vec![0u32; nv + 1];
+        for &i in &mesh.indices {
+            offsets[i as usize + 1] += 1;
         }
-        self.wire_verts = data.len() as u32;
-        true
-    }
-
-    pub fn set_frame(
-        &mut self,
-        viewproj: Mat4,
-        cam_pos: Vec3,
-        light1: Vec3,
-        light2: Vec3,
-        heat_on: bool,
-        heat_scale: f32,
-        groups_on: bool,
-        hover_group: f32,
-        show_mesh: bool,
-        show_wireframe: bool,
-    ) {
-        let u = Uniforms {
-            viewproj: viewproj.to_cols_array_2d(),
-            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
-            params: [
-                if heat_on { 1.0 } else { 0.0 },
-                heat_scale,
-                if groups_on { 1.0 } else { 0.0 },
-                hover_group,
-            ],
-            light1: [light1.x, light1.y, light1.z, 0.0],
-            light2: [light2.x, light2.y, light2.z, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&u));
-        self.show_mesh = show_mesh;
-        self.show_wireframe = show_wireframe;
-    }
-
-    pub fn write_lines_depth(&mut self, lines: &[[f32; 7]]) {
-        self.lines_depth.ensure(
-            &self.device,
-            (lines.len().max(1) * 28) as u64,
-            "scanimprover-lines",
-        );
-        if let Some(buf) = self.lines_depth.buf.as_ref() {
-            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(lines));
+        for v in 0..nv {
+            offsets[v + 1] += offsets[v];
         }
-        self.lines_depth_verts = lines.len() as u32;
-    }
-
-    pub fn write_lines_overlay(&mut self, lines: &[[f32; 7]]) {
-        self.lines_overlay.ensure(
-            &self.device,
-            (lines.len().max(1) * 28) as u64,
-            "scanimprover-lines-overlay",
-        );
-        if let Some(buf) = self.lines_overlay.buf.as_ref() {
-            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(lines));
+        let mut fill = vec![0u32; nv];
+        let mut corners = vec![0u32; mesh.indices.len()];
+        for (ci, &v) in mesh.indices.iter().enumerate() {
+            let v = v as usize;
+            corners[offsets[v] as usize + fill[v] as usize] = ci as u32;
+            fill[v] += 1;
         }
-        self.lines_overlay_verts = lines.len() as u32;
-    }
-
-    pub fn write_fills(&mut self, fills: &[[f32; 7]]) {
-        self.fills.ensure(
-            &self.device,
-            (fills.len().max(1) * 28) as u64,
-            "scanimprover-fills",
-        );
-        if let Some(buf) = self.fills.buf.as_ref() {
-            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(fills));
-        }
-        self.fill_verts = fills.len() as u32;
-    }
-
-    pub fn set_viewport_px(&mut self, w: u32, h: u32) {
-        self.view_px = (w.max(1), h.max(1));
-    }
-
-    fn ensure_offscreen(&mut self) {
-        let (w, h) = self.view_px;
-        if let Some(off) = &self.off {
-            if off.w == w && off.h == h {
-                return;
-            }
-        }
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scanimprover-offscreen"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scanimprover-depth"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24Plus,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scanimprover-blit-bind"),
-            layout: &self.blit_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-            ],
-        });
-        self.off = Some(Offscreen {
-            view,
-            depth,
-            bind,
-            w,
-            h,
-        });
-    }
-
-    pub fn render_offscreen(&mut self) -> Option<wgpu::CommandBuffer> {
-        if self.mesh.is_none() {
-            return None;
-        }
-        self.ensure_offscreen();
-        let off = self.off.as_ref()?;
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("scanimprover-scene"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scanimprover-scene-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &off.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.075,
-                            g: 0.078,
-                            b: 0.095,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &off.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if self.show_mesh {
-                if let Some(m) = &self.mesh {
-                    pass.set_pipeline(&self.mesh_pipe);
-                    pass.set_bind_group(0, &self.uniform_bind, &[]);
-                    pass.set_vertex_buffer(0, m.vb.slice(..));
-                    if let Some(aux) = self.aux.buf.as_ref() {
-                        pass.set_vertex_buffer(1, aux.slice(..));
+        // Per vertex: group incident faces, assign a group id to each corner.
+        let per_vertex: Vec<VertexGroups> = (0..nv)
+            .into_par_iter()
+            .map(|v| {
+                let cs = &corners[offsets[v] as usize..offsets[v + 1] as usize];
+                let n = cs.len();
+                let mut parent: Vec<u32> = (0..n as u32).collect();
+                fn find(p: &mut [u32], mut x: u32) -> u32 {
+                    while p[x as usize] != x {
+                        let g = p[x as usize];
+                        p[x as usize] = p[g as usize];
+                        x = g;
                     }
-                    pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..m.tri_count * 3, 0, 0..1);
+                    x
                 }
+                let unit: Vec<GVec3> = cs
+                    .iter()
+                    .map(|&c| face_n[c as usize / 3].normalize_or_zero())
+                    .collect();
+                for i in 0..n {
+                    for j in i + 1..n {
+                        if unit[i].dot(unit[j]) >= crease_cos {
+                            let (a, b) = (find(&mut parent, i as u32), find(&mut parent, j as u32));
+                            if a != b {
+                                parent[a as usize] = b;
+                            }
+                        }
+                    }
+                }
+                let mut group_of_root: Vec<(u32, usize)> = Vec::new();
+                let mut sums: Vec<GVec3> = Vec::new();
+                let mut corner_groups = Vec::with_capacity(n);
+                for (i, &c) in cs.iter().enumerate() {
+                    let r = find(&mut parent, i as u32);
+                    let g = match group_of_root.iter().find(|(root, _)| *root == r) {
+                        Some((_, g)) => *g,
+                        None => {
+                            group_of_root.push((r, sums.len()));
+                            sums.push(GVec3::ZERO);
+                            sums.len() - 1
+                        }
+                    };
+                    sums[g] += face_n[c as usize / 3];
+                    corner_groups.push((c, g as u32));
+                }
+                let normals = sums
+                    .iter()
+                    .map(|s| {
+                        if s.length_squared() > 1e-20 {
+                            s.normalize().to_array()
+                        } else {
+                            [0.0, 1.0, 0.0]
+                        }
+                    })
+                    .collect();
+                (normals, corner_groups)
+            })
+            .collect();
+        let mut base = vec![0u32; nv + 1];
+        for v in 0..nv {
+            base[v + 1] = base[v] + per_vertex[v].0.len() as u32;
+        }
+        let total = base[nv] as usize;
+        let mut render_to_mesh = vec![0u32; total];
+        let mut normals = vec![[0.0f32; 3]; total];
+        let mut indices = vec![0u32; mesh.indices.len()];
+        for (v, (group_normals, corner_groups)) in per_vertex.iter().enumerate() {
+            for (g, n) in group_normals.iter().enumerate() {
+                let rv = base[v] as usize + g;
+                render_to_mesh[rv] = v as u32;
+                normals[rv] = *n;
             }
-            if self.show_wireframe && self.wire_verts > 0 {
-                pass.set_pipeline(&self.line_pipe);
-                pass.set_bind_group(0, &self.uniform_bind, &[]);
-                if let Some(buf) = self.wire.buf.as_ref() {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                }
-                pass.draw(0..self.wire_verts, 0..1);
-            }
-            if self.fill_verts > 0 {
-                pass.set_pipeline(&self.fill_pipe);
-                pass.set_bind_group(0, &self.uniform_bind, &[]);
-                if let Some(buf) = self.fills.buf.as_ref() {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                }
-                pass.draw(0..self.fill_verts, 0..1);
-            }
-            if self.lines_depth_verts > 0 {
-                pass.set_pipeline(&self.line_pipe);
-                pass.set_bind_group(0, &self.uniform_bind, &[]);
-                if let Some(buf) = self.lines_depth.buf.as_ref() {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                }
-                pass.draw(0..self.lines_depth_verts, 0..1);
-            }
-            if self.lines_overlay_verts > 0 {
-                pass.set_pipeline(&self.line_pipe_nodepth);
-                pass.set_bind_group(0, &self.uniform_bind, &[]);
-                if let Some(buf) = self.lines_overlay.buf.as_ref() {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                }
-                pass.draw(0..self.lines_overlay_verts, 0..1);
+            for &(corner, g) in corner_groups {
+                indices[corner as usize] = base[v] + g;
             }
         }
-        Some(encoder.finish())
-    }
-
-    pub fn blit(
-        &self,
-        info: &egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-    ) {
-        let off = match &self.off {
-            Some(o) => o,
-            None => return,
-        };
-        let vp = info.viewport_in_pixels();
-        render_pass.set_scissor_rect(
-            vp.left_px.max(0) as u32,
-            vp.top_px.max(0) as u32,
-            vp.width_px.max(0) as u32,
-            vp.height_px.max(0) as u32,
-        );
-        render_pass.set_pipeline(&self.blit_pipe);
-        render_pass.set_bind_group(0, &off.bind, &[]);
-        render_pass.draw(0..4, 0..1);
-    }
-}
-
-pub struct ViewportCallback {
-    pub gpu: Arc<Mutex<GpuState>>,
-}
-
-impl egui_wgpu::CallbackTrait for ViewportCallback {
-    fn prepare(
-        &self,
-        _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _egui_encoder: &mut wgpu::CommandEncoder,
-        _callback_resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        match self.gpu.lock() {
-            Ok(mut gpu) => match gpu.render_offscreen() {
-                Some(cb) => vec![cb],
-                None => Vec::new(),
-            },
-            Err(_) => Vec::new(),
+        CreaseSplit {
+            render_to_mesh,
+            normals,
+            indices,
         }
     }
-
-    fn paint(
-        &self,
-        info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        _callback_resources: &egui_wgpu::CallbackResources,
-    ) {
-        if let Ok(gpu) = self.gpu.lock() {
-            gpu.blit(&info, render_pass);
-        }
-    }
-}
-
-pub fn make_callback(gpu: Arc<Mutex<GpuState>>, rect: egui::Rect) -> egui::PaintCallback {
-    egui_wgpu::Callback::new_paint_callback(rect, ViewportCallback { gpu })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mesh_wgsl_syntax_and_front_facing() {
-        assert!(MESH_WGSL.contains("@builtin(front_facing) is_front: bool"));
-        assert!(MESH_WGSL.contains("if (!is_front)"));
-        // Validate WGSL parsing with wgpu naga frontend
-        let res = wgpu::naga::front::wgsl::parse_str(MESH_WGSL);
-        assert!(res.is_ok(), "MESH_WGSL failed to parse: {:?}", res.err());
+    fn cube() -> ScanMesh {
+        let c = |x: f32, y: f32, z: f32| [x, y, z];
+        let v = [
+            c(-1.0, -1.0, -1.0),
+            c(1.0, -1.0, -1.0),
+            c(1.0, 1.0, -1.0),
+            c(-1.0, 1.0, -1.0),
+            c(-1.0, -1.0, 1.0),
+            c(1.0, -1.0, 1.0),
+            c(1.0, 1.0, 1.0),
+            c(-1.0, 1.0, 1.0),
+        ];
+        let idx = [
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6,
+            5, 0, 4, 7, 0, 7, 3,
+        ];
+        ScanMesh::from_indexed(v.to_vec(), idx.to_vec())
     }
 
     #[test]
-    fn test_line_and_blit_wgsl_syntax() {
-        assert!(wgpu::naga::front::wgsl::parse_str(LINE_WGSL).is_ok());
-        assert!(wgpu::naga::front::wgsl::parse_str(BLIT_WGSL).is_ok());
+    fn wireframe_dedupes_shared_edges() {
+        let m = ScanMesh::from_indexed(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![0, 1, 2, 1, 3, 2],
+        );
+        let lines = wireframe_lines(&m, None, [1.0; 4]);
+        assert_eq!(lines.len(), 10);
+        let hidden = [true, false];
+        let lines = wireframe_lines(&m, Some(&hidden), [1.0; 4]);
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn visible_indices_drops_hidden_triangles() {
+        let idx = vec![0u32, 1, 2, 1, 3, 2];
+        assert_eq!(visible_indices(&idx, None).len(), 6);
+        assert_eq!(visible_indices(&idx, Some(&[false, false])).len(), 6);
+        assert_eq!(visible_indices(&idx, Some(&[true, false])), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn crease_split_separates_cube_faces_but_keeps_smooth_surfaces() {
+        let cube = cube();
+        assert_eq!(cube.vertex_count(), 8);
+        let split = CreaseSplit::build(&cube, CREASE_COS);
+        assert_eq!(split.render_to_mesh.len(), 24);
+        assert_eq!(split.indices.len(), cube.indices.len());
+        for chunk in split.indices.chunks_exact(3) {
+            let n0 = GVec3::from(split.normals[chunk[0] as usize]);
+            let n1 = GVec3::from(split.normals[chunk[1] as usize]);
+            let n2 = GVec3::from(split.normals[chunk[2] as usize]);
+            assert!(
+                n0.dot(n1) > 0.999 && n1.dot(n2) > 0.999,
+                "cube faces must be flat"
+            );
+            for &ri in chunk {
+                assert!((split.render_to_mesh[ri as usize] as usize) < 8);
+            }
+        }
+        let flat = ScanMesh::from_indexed(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![0, 1, 2, 1, 3, 2],
+        );
+        let split = CreaseSplit::build(&flat, CREASE_COS);
+        assert_eq!(split.render_to_mesh.len(), 4);
+        assert_eq!(split.indices, flat.indices);
+    }
+
+    #[test]
+    fn line_and_fill_meshes_drop_incomplete_primitives() {
+        let v = [0.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let m = line_mesh(&[v, v, v]);
+        assert_eq!(m.count_vertices(), 2);
+        let m = fill_mesh(&[v, v, v, v]);
+        assert_eq!(m.count_vertices(), 3);
+        assert_eq!(srgb_to_linear([1.0, 0.0, 0.5, 0.3])[0], 1.0);
+        assert!(srgb_to_linear([0.5, 0.0, 0.0, 1.0])[0] < 0.25);
     }
 }

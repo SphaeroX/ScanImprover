@@ -1,5 +1,13 @@
+//! Floating object browser listing the mesh, hidden regions and fitted
+//! reference features with their per-object actions.
+
 use crate::app::App;
-use eframe::egui;
+use crate::geom::alignment::{AxisChoice, FeatureRef, OriginRef};
+use crate::ui::alignment::{
+    FeatureAssignmentAction, render_feature_assignment_buttons_ui, render_feature_badge_ui,
+};
+use crate::ui::theme;
+use egui;
 use glam::Vec3;
 
 enum BrowserAction {
@@ -31,924 +39,506 @@ enum BrowserAction {
     ExportFreeform(u64),
     ExportAllReferences,
     AlignToFeatures,
-    ToggleAssign(
-        crate::geom::alignment::FeatureRef,
-        crate::geom::alignment::AxisChoice,
-    ),
-    ToggleOrigin(crate::geom::alignment::FeatureRef),
+    ToggleAssign(FeatureRef, AxisChoice),
+    ToggleOrigin(FeatureRef),
 }
 
-/// Renders the Object Browser window on the right side of the 3D viewport.
-pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: egui::Rect) {
-    if !app.show_object_browser {
-        return;
-    }
+/// Header line of one object row: visibility checkbox, color dot, name,
+/// badges and a delete button. Returns (name clicked, visibility toggled,
+/// delete clicked).
+#[allow(clippy::too_many_arguments)]
+fn object_row_header(
+    ui: &mut egui::Ui,
+    visible: bool,
+    color: Option<egui::Color32>,
+    name: &str,
+    selected: bool,
+    cur_axis: Option<AxisChoice>,
+    is_orig: bool,
+    delete_tip: &str,
+    trailing: Option<String>,
+) -> (bool, bool, bool) {
+    let mut name_clicked = false;
+    let mut vis_toggled = false;
+    let mut delete_clicked = false;
+    ui.horizontal(|ui| {
+        let mut vis = visible;
+        if ui.checkbox(&mut vis, "").changed() {
+            vis_toggled = true;
+        }
+        if let Some(col) = color {
+            let (dot_rect, _) =
+                ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::empty());
+            ui.painter().circle_filled(dot_rect.center(), 4.0, col);
+        }
+        let text = egui::RichText::new(name)
+            .size(12.0)
+            .strong()
+            .color(if visible {
+                theme::pal().text_strong
+            } else {
+                theme::pal().text_muted
+            });
+        if ui.selectable_label(selected, text).clicked() {
+            name_clicked = true;
+        }
+        render_feature_badge_ui(ui, cur_axis, is_orig);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button(
+                    egui::RichText::new("×")
+                        .size(11.0)
+                        .color(theme::pal().danger),
+                )
+                .on_hover_text(delete_tip)
+                .clicked()
+            {
+                delete_clicked = true;
+            }
+            if let Some(t) = trailing {
+                ui.label(
+                    egui::RichText::new(t)
+                        .size(10.5)
+                        .color(theme::pal().text_muted),
+                );
+            }
+        });
+    });
+    (name_clicked, vis_toggled, delete_clicked)
+}
 
+fn row_frame(selected: bool) -> egui::Frame {
+    egui::Frame::new()
+        .fill(if selected {
+            theme::pal().accent.gamma_multiply(0.16)
+        } else {
+            theme::pal().panel_hover.gamma_multiply(0.45)
+        })
+        .stroke(if selected {
+            egui::Stroke::new(1.0, theme::pal().accent.gamma_multiply(0.55))
+        } else {
+            egui::Stroke::NONE
+        })
+        .corner_radius(5.0)
+        .inner_margin(egui::Margin::symmetric(6, 5))
+}
+
+fn section_caption(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(6.0);
+    theme::caption(ui, text);
+}
+
+fn detail_text(ui: &mut egui::Ui, text: String) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.5)
+            .color(theme::pal().text_muted),
+    );
+}
+
+fn axis_buttons(ui: &mut egui::Ui, prefix: &str) -> Option<Vec3> {
+    let mut out = None;
+    for (label, a) in [("X", Vec3::X), ("Y", Vec3::Y), ("Z", Vec3::Z)] {
+        if ui.small_button(format!("{prefix} to {label}")).clicked() {
+            out = Some(a);
+        }
+    }
+    out
+}
+
+/// Renders the object browser content (hosted in the right side panel).
+pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui) {
     let align_slots = app.align_slots.clone();
     let mut actions: Vec<BrowserAction> = Vec::new();
-
-    let total_count = (if app.display().is_some() { 1 } else { 0 })
+    let total_count = usize::from(app.has_mesh())
         + app.hidden_regions.len()
         + app.planes.len()
         + app.circles.len()
         + app.freeforms.len()
-        + (if app.sym.is_some() { 1 } else { 0 });
+        + usize::from(app.sym.is_some());
 
-    let window_title = format!("Objects ({total_count})");
-
-    egui::Window::new(window_title)
-        .id(egui::Id::new("object_browser_window"))
-        .default_open(true)
-        .resizable(true)
-        .collapsible(true)
-        .default_size(egui::vec2(270.0, 340.0))
-        .min_width(230.0)
-        .max_width(380.0)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-14.0, 12.0))
-        .frame(
-            egui::Frame::window(&ui.style())
-                .fill(egui::Color32::from_rgba_unmultiplied(20, 24, 32, 235))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_unmultiplied(100, 140, 220, 50),
-                ))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::symmetric(10, 8)),
-        )
-        .show(ui.ctx(), |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(450.0)
-                .show(ui, |ui| {
-                    // Quick Action Bar if faces are selected
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("Objects ({total_count})"))
+                .strong()
+                .size(13.5)
+                .color(theme::pal().text_strong),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button(
+                    egui::RichText::new("×")
+                        .size(11.0)
+                        .color(theme::pal().text_muted),
+                )
+                .on_hover_text("Hide the object browser (toolbar: Objects)")
+                .clicked()
+            {
+                app.show_object_browser = false;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            {
+                {
+                    // Quick actions for the selection
                     if app.sel_count > 0 {
                         egui::Frame::new()
-                            .fill(egui::Color32::from_rgba_unmultiplied(255, 150, 40, 20))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgba_unmultiplied(255, 150, 40, 60),
-                            ))
-                            .corner_radius(4.0)
+                            .fill(theme::pal().select_accent.gamma_multiply(0.10))
+                            .stroke(egui::Stroke::new(1.0, theme::pal().select_accent.gamma_multiply(0.35)))
+                            .corner_radius(5.0)
                             .inner_margin(egui::Margin::symmetric(6, 4))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Selection:")
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(255, 180, 100)),
-                                    );
-                                    if ui.small_button("+ Fit Plane").clicked() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(egui::RichText::new("Selection:").size(11.0).color(theme::pal().select_accent));
+                                    if ui.small_button("+ Fit plane").clicked() {
                                         actions.push(BrowserAction::FitPlane);
                                     }
-                                    if ui.small_button("+ Fit Circle").clicked() {
+                                    if ui.small_button("+ Fit circle").clicked() {
                                         actions.push(BrowserAction::FitCircle);
                                     }
-                                    if ui.small_button("+ Fit Freeform").clicked() {
+                                    if ui.small_button("+ Fit freeform").clicked() {
                                         actions.push(BrowserAction::FitFreeform);
                                     }
-                                    if ui
-                                        .small_button("👁 Hide")
-                                        .on_hover_text("Hide selection (H)")
-                                        .clicked()
-                                    {
+                                    if ui.small_button("Hide").on_hover_text("Hide selection (H)").clicked() {
                                         actions.push(BrowserAction::HideSelection);
                                     }
                                 });
                             });
-                        ui.add_space(6.0);
+                        ui.add_space(4.0);
                     }
 
-                    // --- SECTION 1: MESH ---
-                    ui.label(
-                        egui::RichText::new("MESH")
-                            .size(10.5)
-                            .strong()
-                            .color(egui::Color32::from_rgb(130, 145, 170)),
-                    );
-
+                    // --- Mesh ---------------------------------------------
+                    theme::caption(ui, "Mesh");
                     if let Some(m) = app.display() {
                         let name = app
                             .file_path
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .and_then(|s| s.to_str())
-                            .unwrap_or("Mesh");
-
+                            .unwrap_or("Mesh")
+                            .to_string();
                         let tris = m.triangle_count();
                         let verts = m.vertex_count();
-
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgba_unmultiplied(35, 40, 52, 60))
-                            .corner_radius(4.0)
-                            .inner_margin(egui::Margin::symmetric(6, 4))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let mut vis = app.show_mesh;
-                                    if ui.checkbox(&mut vis, "").changed() {
-                                        actions.push(BrowserAction::ToggleMeshVisibility);
-                                    }
-
-                                    // Mesh indicator icon
+                        row_frame(false).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut vis = app.show_mesh;
+                                if ui.checkbox(&mut vis, "").changed() {
+                                    actions.push(BrowserAction::ToggleMeshVisibility);
+                                }
+                                                                ui.label(egui::RichText::new(name).strong().size(12.0).color(theme::pal().text_strong));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(
-                                        egui::RichText::new("◬")
-                                            .size(13.0)
-                                            .color(egui::Color32::from_rgb(120, 175, 255)),
-                                    );
-
-                                    ui.label(
-                                        egui::RichText::new(name)
-                                            .strong()
-                                            .size(12.0)
-                                            .color(egui::Color32::from_rgb(230, 235, 245)),
-                                    );
-
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("{tris} △"))
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(140, 150, 165)),
-                                            );
-                                        },
-                                    );
-                                });
-
-                                ui.horizontal(|ui| {
-                                    ui.add_space(24.0);
-                                    ui.label(
-                                        egui::RichText::new(format!("{verts} verts"))
-                                            .size(10.0)
-                                            .color(egui::Color32::from_rgb(120, 130, 145)),
+                                        egui::RichText::new(format!("{} tris", theme::format_count(tris)))
+                                            .size(10.5)
+                                            .color(theme::pal().text_muted),
                                     );
                                 });
                             });
+                            ui.horizontal(|ui| {
+                                ui.add_space(24.0);
+                                detail_text(ui, format!("{} verts", theme::format_count(verts)));
+                            });
+                        });
                     } else {
-                        ui.label(
-                            egui::RichText::new("No mesh loaded")
-                                .italics()
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(120)),
-                        );
+                        ui.label(egui::RichText::new("No mesh loaded").italics().size(11.0).color(theme::pal().text_faint));
                     }
 
-                    // --- SECTION: HIDDEN REGIONS ---
-                    let hidden_count = app.hidden_regions.len();
-                    if hidden_count > 0 {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
+                    // --- Hidden regions -----------------------------------
+                    if !app.hidden_regions.is_empty() {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("HIDDEN REGIONS ({hidden_count})"))
-                                    .size(10.5)
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(130, 145, 170)),
-                            );
+                            section_caption(ui, &format!("Hidden regions ({})", app.hidden_regions.len()));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui
-                                    .small_button(egui::RichText::new("Unhide All").size(10.0))
-                                    .on_hover_text("Restore all hidden regions back into mesh")
+                                    .small_button(egui::RichText::new("Unhide all").size(10.0))
+                                    .on_hover_text("Restore all hidden regions back into the mesh")
                                     .clicked()
                                 {
                                     actions.push(BrowserAction::RestoreAllHiddenRegions);
                                 }
                             });
                         });
-
                         for hr in &app.hidden_regions {
-                            let tris = hr.triangle_count();
-                            let bg_color = if hr.visible {
-                                egui::Color32::from_rgba_unmultiplied(35, 45, 60, 60)
-                            } else {
-                                egui::Color32::from_rgba_unmultiplied(25, 28, 36, 40)
-                            };
-
-                            egui::Frame::new()
-                                .fill(bg_color)
-                                .corner_radius(4.0)
-                                .inner_margin(egui::Margin::symmetric(6, 4))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let mut vis = hr.visible;
+                            row_frame(false).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let mut vis = hr.visible;
+                                    if ui.checkbox(&mut vis, "").on_hover_text("Toggle visibility").changed() {
+                                        actions.push(BrowserAction::ToggleHiddenRegionVisibility(hr.id));
+                                    }
+                                    let text_color = if hr.visible { theme::pal().text_strong } else { theme::pal().text_muted };
+                                    ui.label(egui::RichText::new(&hr.name).strong().size(11.5).color(text_color));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui
-                                            .checkbox(&mut vis, "")
-                                            .on_hover_text("Toggle visibility (Ein-/Ausblenden)")
-                                            .changed()
+                                            .small_button(egui::RichText::new("×").size(11.0).color(theme::pal().danger))
+                                            .on_hover_text("Delete these faces permanently")
+                                            .clicked()
                                         {
-                                            actions.push(BrowserAction::ToggleHiddenRegionVisibility(hr.id));
+                                            actions.push(BrowserAction::DeleteHiddenRegion(hr.id));
                                         }
-
-                                        let icon_color = if hr.visible {
-                                            egui::Color32::from_rgb(100, 180, 255)
-                                        } else {
-                                            egui::Color32::from_rgb(100, 110, 125)
-                                        };
-                                        ui.label(egui::RichText::new("👁").size(12.0).color(icon_color));
-
-                                        let text_color = if hr.visible {
-                                            egui::Color32::from_rgb(220, 225, 235)
-                                        } else {
-                                            egui::Color32::from_rgb(150, 155, 170)
-                                        };
+                                        if ui
+                                            .small_button(egui::RichText::new("Restore").size(10.0).color(theme::pal().accent_text))
+                                            .on_hover_text("Restore back into the mesh permanently")
+                                            .clicked()
+                                        {
+                                            actions.push(BrowserAction::RestoreHiddenRegion(hr.id));
+                                        }
                                         ui.label(
-                                            egui::RichText::new(&hr.name)
-                                                .strong()
-                                                .size(11.5)
-                                                .color(text_color),
-                                        );
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("✕")
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(220, 100, 100)),
-                                                    )
-                                                    .on_hover_text("Delete this hidden region")
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::DeleteHiddenRegion(hr.id));
-                                                }
-
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("Restore")
-                                                            .size(10.0)
-                                                            .color(egui::Color32::from_rgb(150, 200, 255)),
-                                                    )
-                                                    .on_hover_text("Restore back into the mesh permanently")
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::RestoreHiddenRegion(hr.id));
-                                                }
-
-                                                ui.label(
-                                                    egui::RichText::new(format!("{tris} △"))
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(140, 150, 165)),
-                                                );
-                                            },
+                                            egui::RichText::new(format!("{} tris", theme::format_count(hr.triangle_count())))
+                                                .size(10.5)
+                                                .color(theme::pal().text_muted),
                                         );
                                     });
                                 });
-                            ui.add_space(2.0);
+                            });
                         }
                     }
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    // --- SECTION 2: FITTED PLANES ---
-                    let plane_count = app.planes.len();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("FITTED PLANES ({plane_count})"))
-                                .size(10.5)
-                                .strong()
-                                .color(egui::Color32::from_rgb(130, 145, 170)),
-                        );
-                    });
-
+                    // --- Planes -------------------------------------------
+                    section_caption(ui, &format!("Fitted planes ({})", app.planes.len()));
                     if app.planes.is_empty() {
-                        ui.label(
-                            egui::RichText::new("No planes fitted yet")
-                                .italics()
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(110)),
-                        );
-                    } else {
-                        for p in &app.planes {
-                            let is_sel = app.selected_plane_id == Some(p.id);
-                            let feat = crate::geom::alignment::FeatureRef::Plane(p.id);
-                            let cur_axis = if align_slots.x == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::X)
-                            } else if align_slots.y == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::Y)
-                            } else if align_slots.z == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::Z)
-                            } else {
-                                None
-                            };
-                            let is_orig = matches!(
-                                align_slots.origin,
-                                crate::geom::alignment::OriginRef::Plane(id) if id == p.id
+                        ui.label(egui::RichText::new("No planes fitted yet").italics().size(11.0).color(theme::pal().text_faint));
+                    }
+                    for p in &app.planes {
+                        let is_sel = app.selected_plane_id == Some(p.id);
+                        let feat = FeatureRef::Plane(p.id);
+                        let cur_axis = align_slots.axis_of(feat);
+                        let is_orig = matches!(align_slots.origin, OriginRef::Plane(id) if id == p.id);
+                        row_frame(is_sel).show(ui, |ui| {
+                            let (clicked, toggled, deleted) = object_row_header(
+                                ui,
+                                p.visible,
+                                Some(theme::color32(p.color)),
+                                &p.name,
+                                is_sel,
+                                cur_axis,
+                                is_orig,
+                                "Delete plane",
+                                None,
                             );
-
-                            let col32 = egui::Color32::from_rgba_unmultiplied(
-                                (p.color[0] * 255.0) as u8,
-                                (p.color[1] * 255.0) as u8,
-                                (p.color[2] * 255.0) as u8,
-                                255,
-                            );
-
-                            let bg_color = if is_sel {
-                                egui::Color32::from_rgba_unmultiplied(50, 70, 105, 80)
-                            } else {
-                                egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40)
-                            };
-
-                            let border_stroke = if is_sel {
-                                egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 120),
-                                )
-                            } else {
-                                egui::Stroke::NONE
-                            };
-
-                            egui::Frame::new()
-                                .fill(bg_color)
-                                .stroke(border_stroke)
-                                .corner_radius(4.0)
-                                .inner_margin(egui::Margin::symmetric(6, 5))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        // Visibility toggle
-                                        let mut vis = p.visible;
-                                        if ui.checkbox(&mut vis, "").changed() {
-                                            actions.push(BrowserAction::TogglePlaneVisibility(p.id));
-                                        }
-
-                                        // Color indicator dot
-                                        let (dot_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            egui::Sense::empty(),
-                                        );
-                                        ui.painter().circle_filled(dot_rect.center(), 4.0, col32);
-
-                                        // Selectable name
-                                        let name_resp = ui.selectable_label(
-                                            is_sel,
-                                            egui::RichText::new(&p.name).size(12.0).strong(),
-                                        );
-                                        if name_resp.clicked() {
-                                            actions.push(BrowserAction::SelectPlane(p.id));
-                                        }
-
-                                        crate::ui::alignment::render_feature_badge_ui(
+                            if clicked {
+                                actions.push(BrowserAction::SelectPlane(p.id));
+                            }
+                            if toggled {
+                                actions.push(BrowserAction::TogglePlaneVisibility(p.id));
+                            }
+                            if deleted {
+                                actions.push(BrowserAction::DeletePlane(p.id));
+                            }
+                            if is_sel {
+                                let n = p.fit.normal;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0);
+                                    ui.vertical(|ui| {
+                                        detail_text(
                                             ui,
-                                            cur_axis,
-                                            is_orig,
+                                            format!(
+                                                "N: ({:.2}, {:.2}, {:.2})  off: {:.2} mm",
+                                                n.x,
+                                                n.y,
+                                                n.z,
+                                                p.fit.point.dot(n)
+                                            ),
                                         );
-
-                                        // Delete button on the right
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("✕")
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(
-                                                                220, 100, 100,
-                                                            )),
-                                                    )
-                                                    .on_hover_text("Delete plane")
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::DeletePlane(p.id));
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    // If this plane is selected, show details & alignment actions
-                                    if is_sel {
-                                        ui.add_space(3.0);
-                                        let normal = p.fit.normal;
-                                        let offset = p.fit.point.dot(normal);
-                                        let rms = p.fit.rms.sqrt();
-
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.vertical(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "N: ({:.2}, {:.2}, {:.2})  off: {:.2} mm",
-                                                        normal.x, normal.y, normal.z, offset
-                                                    ))
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(170, 180, 195)),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "RMS: {:.4} mm · max: {:.4} mm",
-                                                        rms, p.fit.max_dev
-                                                    ))
-                                                    .size(10.0)
-                                                    .color(egui::Color32::from_rgb(140, 150, 165)),
-                                                );
-
-                                                ui.add_space(2.0);
-                                                ui.horizontal(|ui| {
-                                                    if ui.small_button("N → X").clicked() {
-                                                        actions.push(BrowserAction::AlignPlane(
-                                                            p.id,
-                                                            Vec3::X,
-                                                        ));
-                                                    }
-                                                    if ui.small_button("N → Y").clicked() {
-                                                        actions.push(BrowserAction::AlignPlane(
-                                                            p.id,
-                                                            Vec3::Y,
-                                                        ));
-                                                    }
-                                                    if ui.small_button("N → Z").clicked() {
-                                                        actions.push(BrowserAction::AlignPlane(
-                                                            p.id,
-                                                            Vec3::Z,
-                                                        ));
-                                                    }
-                                                    if ui
-                                                        .small_button("Origin on plane")
-                                                        .clicked()
-                                                    {
-                                                        actions.push(
-                                                            BrowserAction::OriginOnPlane(p.id),
-                                                        );
-                                                    }
-                                                });
-                                                ui.add_space(2.0);
-                                                ui.horizontal(|ui| {
-                                                    if ui
-                                                        .small_button("Export Plane…")
-                                                        .on_hover_text("Export this plane for Fusion 360 / CAD (STEP, Script, DXF)")
-                                                        .clicked()
-                                                    {
-                                                        actions.push(BrowserAction::ExportPlane(p.id));
-                                                    }
-                                                });
-                                                ui.add_space(2.0);
-                                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
-                                                    ui,
-                                                    feat,
-                                                    cur_axis,
-                                                    is_orig,
-                                                ) {
-                                                    match action {
-                                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
-                                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
-                                                        }
-                                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
-                                                            actions.push(BrowserAction::ToggleOrigin(feat));
-                                                        }
-                                                    }
-                                                }
-                                            });
+                                        detail_text(ui, format!("RMS: {:.4} mm · max: {:.4} mm", p.fit.rms.sqrt(), p.fit.max_dev));
+                                        ui.horizontal_wrapped(|ui| {
+                                            if let Some(a) = axis_buttons(ui, "N") {
+                                                actions.push(BrowserAction::AlignPlane(p.id, a));
+                                            }
+                                            if ui.small_button("Origin on plane").clicked() {
+                                                actions.push(BrowserAction::OriginOnPlane(p.id));
+                                            }
+                                            if ui
+                                                .small_button("Export…")
+                                                .on_hover_text("Export this plane for Fusion 360 / CAD (STEP, Script, DXF)")
+                                                .clicked()
+                                            {
+                                                actions.push(BrowserAction::ExportPlane(p.id));
+                                            }
                                         });
-                                    }
+                                        if let Some(action) = render_feature_assignment_buttons_ui(ui, feat, cur_axis, is_orig) {
+                                            actions.push(match action {
+                                                FeatureAssignmentAction::Assign(ax) => BrowserAction::ToggleAssign(feat, ax),
+                                                FeatureAssignmentAction::ToggleOrigin => BrowserAction::ToggleOrigin(feat),
+                                            });
+                                        }
+                                    });
                                 });
-                            ui.add_space(2.0);
-                        }
+                            }
+                        });
                     }
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    // --- SECTION 3: FITTED CIRCLES ---
-                    let circle_count = app.circles.len();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("FITTED CIRCLES ({circle_count})"))
-                                .size(10.5)
-                                .strong()
-                                .color(egui::Color32::from_rgb(130, 145, 170)),
-                        );
-                    });
-
+                    // --- Circles ------------------------------------------
+                    section_caption(ui, &format!("Fitted circles ({})", app.circles.len()));
                     if app.circles.is_empty() {
-                        ui.label(
-                            egui::RichText::new("No circles fitted yet")
-                                .italics()
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(110)),
-                        );
-                    } else {
-                        for c in &app.circles {
-                            let is_sel = app.selected_circle_id == Some(c.id);
-                            let feat = crate::geom::alignment::FeatureRef::Circle(c.id);
-                            let cur_axis = if align_slots.x == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::X)
-                            } else if align_slots.y == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::Y)
-                            } else if align_slots.z == Some(feat) {
-                                Some(crate::geom::alignment::AxisChoice::Z)
-                            } else {
-                                None
-                            };
-                            let is_orig = matches!(
-                                align_slots.origin,
-                                crate::geom::alignment::OriginRef::CircleCenter(id) if id == c.id
+                        ui.label(egui::RichText::new("No circles fitted yet").italics().size(11.0).color(theme::pal().text_faint));
+                    }
+                    for c in &app.circles {
+                        let is_sel = app.selected_circle_id == Some(c.id);
+                        let feat = FeatureRef::Circle(c.id);
+                        let cur_axis = align_slots.axis_of(feat);
+                        let is_orig = matches!(align_slots.origin, OriginRef::CircleCenter(id) if id == c.id);
+                        row_frame(is_sel).show(ui, |ui| {
+                            let (clicked, toggled, deleted) = object_row_header(
+                                ui,
+                                c.visible,
+                                Some(theme::color32(c.color)),
+                                &c.name,
+                                is_sel,
+                                cur_axis,
+                                is_orig,
+                                "Delete circle",
+                                None,
                             );
-
-                            let col32 = egui::Color32::from_rgba_unmultiplied(
-                                (c.color[0] * 255.0) as u8,
-                                (c.color[1] * 255.0) as u8,
-                                (c.color[2] * 255.0) as u8,
-                                255,
-                            );
-
-                            let bg_color = if is_sel {
-                                egui::Color32::from_rgba_unmultiplied(50, 70, 105, 80)
-                            } else {
-                                egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40)
-                            };
-
-                            let border_stroke = if is_sel {
-                                egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 120),
-                                )
-                            } else {
-                                egui::Stroke::NONE
-                            };
-
-                            egui::Frame::new()
-                                .fill(bg_color)
-                                .stroke(border_stroke)
-                                .corner_radius(4.0)
-                                .inner_margin(egui::Margin::symmetric(6, 5))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        // Visibility toggle
-                                        let mut vis = c.visible;
-                                        if ui.checkbox(&mut vis, "").changed() {
-                                            actions.push(BrowserAction::ToggleCircleVisibility(c.id));
-                                        }
-
-                                        // Color indicator dot
-                                        let (dot_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            egui::Sense::empty(),
-                                        );
-                                        ui.painter().circle_filled(dot_rect.center(), 4.0, col32);
-
-                                        // Selectable name
-                                        let name_resp = ui.selectable_label(
-                                            is_sel,
-                                            egui::RichText::new(&c.name).size(12.0).strong(),
-                                        );
-                                        if name_resp.clicked() {
-                                            actions.push(BrowserAction::SelectCircle(c.id));
-                                        }
-
-                                        crate::ui::alignment::render_feature_badge_ui(
+                            if clicked {
+                                actions.push(BrowserAction::SelectCircle(c.id));
+                            }
+                            if toggled {
+                                actions.push(BrowserAction::ToggleCircleVisibility(c.id));
+                            }
+                            if deleted {
+                                actions.push(BrowserAction::DeleteCircle(c.id));
+                            }
+                            if is_sel {
+                                let ce = c.fit.center;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0);
+                                    ui.vertical(|ui| {
+                                        detail_text(
                                             ui,
-                                            cur_axis,
-                                            is_orig,
+                                            format!("R: {:.3} mm  center: ({:.1}, {:.1}, {:.1})", c.fit.radius, ce.x, ce.y, ce.z),
                                         );
-
-                                        // Delete button on the right
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("✕")
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(
-                                                                220, 100, 100,
-                                                            )),
-                                                    )
-                                                    .on_hover_text("Delete circle")
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::DeleteCircle(c.id));
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    // If selected, show details & alignment actions
-                                    if is_sel {
-                                        ui.add_space(3.0);
-                                        let center = c.fit.center;
-                                        let radius = c.fit.radius;
-                                        let rad_rms = c.fit.radial_rms.sqrt();
-
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.vertical(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "R: {:.3} mm  Center: ({:.1}, {:.1}, {:.1})",
-                                                        radius, center.x, center.y, center.z
-                                                    ))
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(170, 180, 195)),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "Radial RMS: {:.4} mm",
-                                                        rad_rms
-                                                    ))
-                                                    .size(10.0)
-                                                    .color(egui::Color32::from_rgb(140, 150, 165)),
-                                                );
-
-                                                ui.add_space(2.0);
-                                                ui.horizontal(|ui| {
-                                                    if ui.small_button("Axis → X").clicked() {
-                                                        actions.push(BrowserAction::AlignCircle(
-                                                            c.id,
-                                                            Vec3::X,
-                                                        ));
-                                                    }
-                                                    if ui.small_button("Axis → Y").clicked() {
-                                                        actions.push(BrowserAction::AlignCircle(
-                                                            c.id,
-                                                            Vec3::Y,
-                                                        ));
-                                                    }
-                                                    if ui.small_button("Axis → Z").clicked() {
-                                                        actions.push(BrowserAction::AlignCircle(
-                                                            c.id,
-                                                            Vec3::Z,
-                                                        ));
-                                                    }
-                                                    if ui
-                                                        .small_button("Center at origin")
-                                                        .clicked()
-                                                    {
-                                                        actions.push(
-                                                            BrowserAction::OriginAtCircle(c.id),
-                                                        );
-                                                    }
-                                                });
-                                                ui.add_space(2.0);
-                                                ui.horizontal(|ui| {
-                                                    if ui
-                                                        .small_button("Export Circle…")
-                                                        .on_hover_text("Export this circle for Fusion 360 / CAD (STEP, Script, DXF)")
-                                                        .clicked()
-                                                    {
-                                                        actions.push(BrowserAction::ExportCircle(c.id));
-                                                    }
-                                                });
-                                                ui.add_space(2.0);
-                                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
-                                                    ui,
-                                                    feat,
-                                                    cur_axis,
-                                                    is_orig,
-                                                ) {
-                                                    match action {
-                                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
-                                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
-                                                        }
-                                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
-                                                            actions.push(BrowserAction::ToggleOrigin(feat));
-                                                        }
-                                                    }
-                                                }
-                                            });
+                                        detail_text(ui, format!("Radial RMS: {:.4} mm", c.fit.radial_rms.sqrt()));
+                                        ui.horizontal_wrapped(|ui| {
+                                            if let Some(a) = axis_buttons(ui, "Axis") {
+                                                actions.push(BrowserAction::AlignCircle(c.id, a));
+                                            }
+                                            if ui.small_button("Center at origin").clicked() {
+                                                actions.push(BrowserAction::OriginAtCircle(c.id));
+                                            }
+                                            if ui
+                                                .small_button("Export…")
+                                                .on_hover_text("Export this circle for Fusion 360 / CAD (STEP, Script, DXF)")
+                                                .clicked()
+                                            {
+                                                actions.push(BrowserAction::ExportCircle(c.id));
+                                            }
                                         });
-                                    }
+                                        if let Some(action) = render_feature_assignment_buttons_ui(ui, feat, cur_axis, is_orig) {
+                                            actions.push(match action {
+                                                FeatureAssignmentAction::Assign(ax) => BrowserAction::ToggleAssign(feat, ax),
+                                                FeatureAssignmentAction::ToggleOrigin => BrowserAction::ToggleOrigin(feat),
+                                            });
+                                        }
+                                    });
                                 });
-                            ui.add_space(2.0);
-                        }
+                            }
+                        });
                     }
 
-                    // --- SECTION 4: FITTED FREEFORMS ---
-                    let freeform_count = app.freeforms.len();
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("FITTED FREEFORMS ({freeform_count})"))
-                                .size(10.5)
-                                .strong()
-                                .color(egui::Color32::from_rgb(130, 145, 170)),
-                        );
-                    });
-
+                    // --- Freeforms ----------------------------------------
+                    section_caption(ui, &format!("Fitted freeforms ({})", app.freeforms.len()));
                     if app.freeforms.is_empty() {
                         ui.label(
                             egui::RichText::new("No freeform surfaces fitted yet")
                                 .italics()
                                 .size(11.0)
-                                .color(egui::Color32::from_gray(110)),
+                                .color(theme::pal().text_faint),
                         );
-                    } else {
-                        for f in &app.freeforms {
-                            let is_sel = app.selected_freeform_id == Some(f.id);
-                            let fitting = app.freeform_job.map(|(_, fid)| fid) == Some(f.id)
-                                || f.refit_pending;
-
-                            let col32 = egui::Color32::from_rgba_unmultiplied(
-                                (f.color[0] * 255.0) as u8,
-                                (f.color[1] * 255.0) as u8,
-                                (f.color[2] * 255.0) as u8,
-                                255,
+                    }
+                    for f in &app.freeforms {
+                        let is_sel = app.selected_freeform_id == Some(f.id);
+                        let fitting = app.freeform_job.map(|(_, fid)| fid) == Some(f.id) || f.refit_pending;
+                        row_frame(is_sel).show(ui, |ui| {
+                            let (clicked, toggled, deleted) = object_row_header(
+                                ui,
+                                f.visible,
+                                Some(theme::color32(f.color)),
+                                &f.name,
+                                is_sel,
+                                None,
+                                false,
+                                "Delete freeform surface",
+                                fitting.then(|| "fitting…".to_string()),
                             );
-
-                            let bg_color = if is_sel {
-                                egui::Color32::from_rgba_unmultiplied(50, 70, 105, 80)
-                            } else {
-                                egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40)
-                            };
-
-                            let border_stroke = if is_sel {
-                                egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 120),
-                                )
-                            } else {
-                                egui::Stroke::NONE
-                            };
-
-                            egui::Frame::new()
-                                .fill(bg_color)
-                                .stroke(border_stroke)
-                                .corner_radius(4.0)
-                                .inner_margin(egui::Margin::symmetric(6, 5))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        // Visibility toggle
-                                        let mut vis = f.visible;
-                                        if ui.checkbox(&mut vis, "").changed() {
-                                            actions.push(BrowserAction::ToggleFreeformVisibility(f.id));
-                                        }
-
-                                        // Color indicator dot
-                                        let (dot_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            egui::Sense::empty(),
-                                        );
-                                        ui.painter().circle_filled(dot_rect.center(), 4.0, col32);
-
-                                        // Selectable name
-                                        let name_resp = ui.selectable_label(
-                                            is_sel,
-                                            egui::RichText::new(&f.name).size(12.0).strong(),
-                                        );
-                                        if name_resp.clicked() {
-                                            actions.push(BrowserAction::SelectFreeform(f.id));
-                                        }
-
-                                        // Delete button on the right
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button(
-                                                        egui::RichText::new("✕")
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(
-                                                                220, 100, 100,
-                                                            )),
-                                                    )
-                                                    .on_hover_text("Delete freeform surface")
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::DeleteFreeform(f.id));
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    // If selected, show details
-                                    if is_sel {
-                                        ui.add_space(3.0);
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.vertical(|ui| {
-                                                if fitting {
-                                                    ui.horizontal(|ui| {
-                                                        ui.add(egui::Spinner::new());
-                                                        ui.label(
-                                                            egui::RichText::new("Fitting surface…")
-                                                                .size(10.5)
-                                                                .color(egui::Color32::from_rgb(
-                                                                    170, 180, 195,
-                                                                )),
-                                                        );
-                                                    });
-                                                } else if f.surface.is_some() {
-                                                    ui.label(
-                                                        egui::RichText::new(format!(
-                                                            "RMS: {:.4} mm · overshoot: {:.2} mm · {} tris",
-                                                            f.rms,
-                                                            f.params.overshoot_mm,
-                                                            f.surface.as_ref().unwrap().triangle_count()
-                                                        ))
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(170, 180, 195)),
-                                                    );
-                                                }
-                                                ui.add_space(2.0);
-                                                if ui
-                                                    .small_button("Export Freeform…")
-                                                    .on_hover_text(
-                                                        "Export as STEP CAD surface (B-spline) or mesh (STL, OBJ, PLY)",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    actions.push(BrowserAction::ExportFreeform(f.id));
-                                                }
-                                            });
-                                        });
-                                    }
-                                });
-                            ui.add_space(2.0);
-                        }
-                    }
-
-                    // --- SECTION 5: SYMMETRY PLANE (if active) ---
-                    let sym_show = app.sym.map(|s| s.show);
-                    if let Some(mut show) = sym_show {
-                        let feat = crate::geom::alignment::FeatureRef::SymmetryPlane;
-                        let cur_axis = if align_slots.x == Some(feat) {
-                            Some(crate::geom::alignment::AxisChoice::X)
-                        } else if align_slots.y == Some(feat) {
-                            Some(crate::geom::alignment::AxisChoice::Y)
-                        } else if align_slots.z == Some(feat) {
-                            Some(crate::geom::alignment::AxisChoice::Z)
-                        } else {
-                            None
-                        };
-                        let is_orig = matches!(
-                            align_slots.origin,
-                            crate::geom::alignment::OriginRef::SymmetryPlane
-                        );
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
-                        ui.label(
-                            egui::RichText::new("SYMMETRY PLANE")
-                                .size(10.5)
-                                .strong()
-                                .color(egui::Color32::from_rgb(130, 145, 170)),
-                        );
-
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgba_unmultiplied(35, 40, 52, 40))
-                            .corner_radius(4.0)
-                            .inner_margin(egui::Margin::symmetric(6, 5))
-                            .show(ui, |ui| {
+                            if clicked {
+                                actions.push(BrowserAction::SelectFreeform(f.id));
+                            }
+                            if toggled {
+                                actions.push(BrowserAction::ToggleFreeformVisibility(f.id));
+                            }
+                            if deleted {
+                                actions.push(BrowserAction::DeleteFreeform(f.id));
+                            }
+                            if is_sel {
                                 ui.horizontal(|ui| {
-                                    if ui.checkbox(&mut show, "").changed() {
-                                        actions.push(BrowserAction::ToggleSymmetryVisibility);
-                                    }
-                                    ui.label(
-                                        egui::RichText::new("Symmetry Plane")
-                                            .size(12.0)
-                                            .strong()
-                                            .color(egui::Color32::from_rgb(40, 220, 255)),
-                                    );
-                                    crate::ui::alignment::render_feature_badge_ui(
-                                        ui,
-                                        cur_axis,
-                                        is_orig,
-                                    );
+                                    ui.add_space(20.0);
+                                    ui.vertical(|ui| {
+                                        if fitting {
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::Spinner::new().size(11.0).color(theme::pal().accent));
+                                                detail_text(ui, "Fitting surface…".to_string());
+                                            });
+                                        } else if let Some(surf) = &f.surface {
+                                            detail_text(
+                                                ui,
+                                                format!(
+                                                    "RMS: {:.4} mm · overshoot: {:.2} mm · {} tris",
+                                                    f.rms,
+                                                    f.params.overshoot_mm,
+                                                    theme::format_count(surf.triangle_count())
+                                                ),
+                                            );
+                                        }
+                                        if ui
+                                            .small_button("Export…")
+                                            .on_hover_text("Export as STEP CAD surface (B-spline) or mesh (STL, OBJ, PLY)")
+                                            .clicked()
+                                        {
+                                            actions.push(BrowserAction::ExportFreeform(f.id));
+                                        }
+                                    });
                                 });
-                                ui.add_space(2.0);
-                                if let Some(action) = crate::ui::alignment::render_feature_assignment_buttons_ui(
-                                    ui,
-                                    feat,
-                                    cur_axis,
-                                    is_orig,
-                                ) {
-                                    match action {
-                                        crate::ui::alignment::FeatureAssignmentAction::Assign(ax) => {
-                                            actions.push(BrowserAction::ToggleAssign(feat, ax));
-                                        }
-                                        crate::ui::alignment::FeatureAssignmentAction::ToggleOrigin => {
-                                            actions.push(BrowserAction::ToggleOrigin(feat));
-                                        }
-                                    }
-                                }
-                            });
+                            }
+                        });
                     }
 
-                    let has_assigned_slots = app.align_slots.x.is_some()
-                        || app.align_slots.y.is_some()
-                        || app.align_slots.z.is_some();
+                    // --- Symmetry plane -----------------------------------
+                    if let Some(sym) = app.sym {
+                        let feat = FeatureRef::SymmetryPlane;
+                        let cur_axis = align_slots.axis_of(feat);
+                        let is_orig = matches!(align_slots.origin, OriginRef::SymmetryPlane);
+                        section_caption(ui, "Symmetry plane");
+                        row_frame(false).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut show = sym.show;
+                                if ui.checkbox(&mut show, "").changed() {
+                                    actions.push(BrowserAction::ToggleSymmetryVisibility);
+                                }
+                                ui.label(
+                                    egui::RichText::new("Symmetry plane")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(60, 220, 240)),
+                                );
+                                render_feature_badge_ui(ui, cur_axis, is_orig);
+                            });
+                            if let Some(action) = render_feature_assignment_buttons_ui(ui, feat, cur_axis, is_orig) {
+                                actions.push(match action {
+                                    FeatureAssignmentAction::Assign(ax) => BrowserAction::ToggleAssign(feat, ax),
+                                    FeatureAssignmentAction::ToggleOrigin => BrowserAction::ToggleOrigin(feat),
+                                });
+                            }
+                        });
+                    }
 
-                    if has_assigned_slots {
+                    if align_slots.any_axis_assigned() {
                         ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
                         ui.vertical_centered(|ui| {
-                            let btn = egui::Button::new(
-                                egui::RichText::new("➔ Align to features")
-                                    .size(11.5)
-                                    .strong()
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_rgb(45, 110, 190));
-
-                            if ui
-                                .add(btn)
+                            if theme::primary_button(ui, "Align to features")
                                 .on_hover_text("Align scan coordinates based on assigned features")
                                 .clicked()
                             {
@@ -956,18 +546,11 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                             }
                         });
                     }
-
                     if !app.planes.is_empty() || !app.circles.is_empty() {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         ui.vertical_centered(|ui| {
                             if ui
-                                .button(
-                                    egui::RichText::new("Export all references…")
-                                        .size(11.5)
-                                        .color(egui::Color32::from_rgb(140, 200, 255)),
-                                )
+                                .button(egui::RichText::new("Export all references…").size(11.5).color(theme::pal().accent_text))
                                 .on_hover_text("Export all visible planes and circles into a single CAD file (STEP, Script, DXF)")
                                 .clicked()
                             {
@@ -975,15 +558,13 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                             }
                         });
                     }
-                });
+                }
+            }
         });
 
-    // Process queued actions
     for action in actions {
         match action {
-            BrowserAction::ToggleMeshVisibility => {
-                app.show_mesh = !app.show_mesh;
-            }
+            BrowserAction::ToggleMeshVisibility => app.show_mesh = !app.show_mesh,
             BrowserAction::TogglePlaneVisibility(id) => {
                 if let Some(p) = app.planes.iter_mut().find(|p| p.id == id) {
                     p.visible = !p.visible;
@@ -992,18 +573,10 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                     }
                 }
             }
-            BrowserAction::SelectPlane(id) => {
-                app.select_plane(id);
-            }
-            BrowserAction::DeletePlane(id) => {
-                app.delete_plane(id);
-            }
-            BrowserAction::AlignPlane(id, axis) => {
-                app.rotate_plane_normal_to_axis(id, axis);
-            }
-            BrowserAction::OriginOnPlane(id) => {
-                app.origin_on_plane_id(id);
-            }
+            BrowserAction::SelectPlane(id) => app.select_plane(id),
+            BrowserAction::DeletePlane(id) => app.delete_plane(id),
+            BrowserAction::AlignPlane(id, axis) => app.rotate_plane_normal_to_axis(id, axis),
+            BrowserAction::OriginOnPlane(id) => app.origin_on_plane_id(id),
             BrowserAction::ToggleCircleVisibility(id) => {
                 if let Some(c) = app.circles.iter_mut().find(|c| c.id == id) {
                     c.visible = !c.visible;
@@ -1012,79 +585,41 @@ pub fn render_object_browser(app: &mut App, ui: &mut egui::Ui, _viewport_rect: e
                     }
                 }
             }
-            BrowserAction::SelectCircle(id) => {
-                app.select_circle(id);
-            }
-            BrowserAction::DeleteCircle(id) => {
-                app.delete_circle(id);
-            }
-            BrowserAction::AlignCircle(id, axis) => {
-                app.rotate_circle_axis_to(id, axis);
-            }
-            BrowserAction::OriginAtCircle(id) => {
-                app.origin_at_circle_id(id);
-            }
-            BrowserAction::FitPlane => {
-                app.fit_plane_from_selection();
-            }
-            BrowserAction::FitCircle => {
-                app.fit_circle_from_selection();
-            }
-            BrowserAction::FitFreeform => {
-                app.fit_freeform_from_selection();
-            }
+            BrowserAction::SelectCircle(id) => app.select_circle(id),
+            BrowserAction::DeleteCircle(id) => app.delete_circle(id),
+            BrowserAction::AlignCircle(id, axis) => app.rotate_circle_axis_to(id, axis),
+            BrowserAction::OriginAtCircle(id) => app.origin_at_circle_id(id),
+            BrowserAction::FitPlane => app.fit_plane_from_selection(),
+            BrowserAction::FitCircle => app.fit_circle_from_selection(),
+            BrowserAction::FitFreeform => app.fit_freeform_from_selection(),
             BrowserAction::ToggleFreeformVisibility(id) => {
                 if let Some(f) = app.freeforms.iter_mut().find(|f| f.id == id) {
                     f.visible = !f.visible;
                 }
             }
-            BrowserAction::SelectFreeform(id) => {
-                app.select_freeform(id);
-            }
-            BrowserAction::DeleteFreeform(id) => {
-                app.delete_freeform(id);
-            }
-            BrowserAction::ExportFreeform(id) => {
-                app.export_freeform_id(id);
-            }
+            BrowserAction::SelectFreeform(id) => app.select_freeform(id),
+            BrowserAction::DeleteFreeform(id) => app.delete_freeform(id),
+            BrowserAction::ExportFreeform(id) => app.export_freeform_id(id),
             BrowserAction::ToggleSymmetryVisibility => {
                 if let Some(sym) = &mut app.sym {
                     sym.show = !sym.show;
                 }
             }
-            BrowserAction::ExportPlane(id) => {
-                app.export_plane_id(id);
-            }
-            BrowserAction::ExportCircle(id) => {
-                app.export_circle_id(id);
-            }
-            BrowserAction::ExportAllReferences => {
-                app.export_all_references();
-            }
+            BrowserAction::ExportPlane(id) => app.export_plane_id(id),
+            BrowserAction::ExportCircle(id) => app.export_circle_id(id),
+            BrowserAction::ExportAllReferences => app.export_all_references(),
             BrowserAction::AlignToFeatures => {
                 app.align_to_features();
             }
-            BrowserAction::ToggleAssign(feat, axis) => {
-                app.toggle_assign_feature(feat, axis);
-            }
-            BrowserAction::ToggleOrigin(feat) => {
-                app.toggle_origin_feature(feat);
-            }
-            BrowserAction::HideSelection => {
-                app.hide_selection();
-            }
+            BrowserAction::ToggleAssign(feat, axis) => app.toggle_assign_feature(feat, axis),
+            BrowserAction::ToggleOrigin(feat) => app.toggle_origin_feature(feat),
+            BrowserAction::HideSelection => app.hide_selection(),
             BrowserAction::ToggleHiddenRegionVisibility(id) => {
-                app.toggle_hidden_region_visibility(id);
+                app.toggle_hidden_region_visibility(id)
             }
-            BrowserAction::RestoreHiddenRegion(id) => {
-                app.restore_hidden_region(id);
-            }
-            BrowserAction::RestoreAllHiddenRegions => {
-                app.restore_all_hidden_regions();
-            }
-            BrowserAction::DeleteHiddenRegion(id) => {
-                app.delete_hidden_region(id);
-            }
+            BrowserAction::RestoreHiddenRegion(id) => app.restore_hidden_region(id),
+            BrowserAction::RestoreAllHiddenRegions => app.restore_all_hidden_regions(),
+            BrowserAction::DeleteHiddenRegion(id) => app.delete_hidden_region(id),
         }
     }
 }

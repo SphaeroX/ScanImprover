@@ -168,15 +168,17 @@ pub fn analyze_mesh(mesh: &Mesh) -> MeshHealthReport {
         }
     }
 
-    // 5. Euler characteristic and watertightness
+    // 5. Non-manifold vertices (triangle fan split into several pieces)
+    let non_manifold_verts = count_non_manifold_vertices(mesh);
+
+    // 6. Euler characteristic and watertightness
     let num_used_verts = nv - isolated_verts;
     let chi = num_used_verts as i32 - unique_edge_count as i32 + nt as i32;
-    let is_watertight = boundary_edges == 0 && non_manifold_edges == 0 && component_count == 1;
-    let genus = if is_watertight {
-        (2 - chi) / 2
-    } else {
-        0
-    };
+    let is_watertight = boundary_edges == 0
+        && non_manifold_edges == 0
+        && non_manifold_verts == 0
+        && component_count == 1;
+    let genus = if is_watertight { (2 - chi) / 2 } else { 0 };
 
     MeshHealthReport {
         is_watertight,
@@ -185,13 +187,94 @@ pub fn analyze_mesh(mesh: &Mesh) -> MeshHealthReport {
         boundary_edges,
         hole_count,
         non_manifold_edges,
-        non_manifold_verts: 0,
+        non_manifold_verts,
         degenerate_faces,
         duplicate_faces,
         isolated_verts,
         component_count,
         inconsistent_normals,
     }
+}
+
+/// Counts vertices whose incident triangles do not form a single fan
+/// (connected through the edges that contain the vertex), e.g. two cones
+/// touching at their tips or a "bow tie" of two surfaces sharing a vertex.
+pub fn count_non_manifold_vertices(mesh: &Mesh) -> usize {
+    let nv = mesh.vertex_count();
+    let nt = mesh.triangle_count();
+    if nv == 0 || nt == 0 {
+        return 0;
+    }
+    // CSR vertex -> incident triangles
+    let mut offsets = vec![0u32; nv + 1];
+    for &i in &mesh.indices {
+        offsets[i as usize + 1] += 1;
+    }
+    for v in 0..nv {
+        offsets[v + 1] += offsets[v];
+    }
+    let mut fill = vec![0u32; nv];
+    let mut tris_of_vert = vec![0u32; mesh.indices.len()];
+    for t in 0..nt {
+        for k in 0..3 {
+            let v = mesh.indices[3 * t + k] as usize;
+            tris_of_vert[offsets[v] as usize + fill[v] as usize] = t as u32;
+            fill[v] += 1;
+        }
+    }
+    let indices = &mesh.indices;
+    (0..nv)
+        .into_par_iter()
+        .filter(|&v| {
+            let start = offsets[v] as usize;
+            let end = offsets[v + 1] as usize;
+            let deg = end - start;
+            if deg < 2 {
+                return false;
+            }
+            // Each incident triangle contributes its two edges (v, w).
+            // Triangles sharing a w are connected in the fan.
+            let mut links: Vec<(u32, u32)> = Vec::with_capacity(deg * 2);
+            for (local, &t) in tris_of_vert[start..end].iter().enumerate() {
+                let tri = [
+                    indices[3 * t as usize],
+                    indices[3 * t as usize + 1],
+                    indices[3 * t as usize + 2],
+                ];
+                for &w in &tri {
+                    if w as usize != v {
+                        links.push((w, local as u32));
+                    }
+                }
+            }
+            links.sort_unstable();
+            let mut parent: Vec<u32> = (0..deg as u32).collect();
+            fn find(parent: &mut [u32], mut x: u32) -> u32 {
+                while parent[x as usize] != x {
+                    let p = parent[x as usize];
+                    parent[x as usize] = parent[p as usize];
+                    x = p;
+                }
+                x
+            }
+            let mut components = deg;
+            let mut i = 0;
+            while i < links.len() {
+                let mut j = i + 1;
+                while j < links.len() && links[j].0 == links[i].0 {
+                    let a = find(&mut parent, links[i].1);
+                    let b = find(&mut parent, links[j].1);
+                    if a != b {
+                        parent[a as usize] = b;
+                        components -= 1;
+                    }
+                    j += 1;
+                }
+                i = j;
+            }
+            components > 1
+        })
+        .count()
 }
 
 /// Removes degenerate triangles (zero area / duplicate vertex indices) and cleans isolated vertices.
@@ -320,11 +403,7 @@ pub fn unify_normals(mesh: &Mesh) -> Mesh {
 }
 
 /// Removes disconnected mesh shells (floating debris) smaller than the given face ratio threshold.
-pub fn remove_small_components(
-    mesh: &Mesh,
-    keep_largest_only: bool,
-    min_face_ratio: f32,
-) -> Mesh {
+pub fn remove_small_components(mesh: &Mesh, keep_largest_only: bool, min_face_ratio: f32) -> Mesh {
     let nt = mesh.triangle_count();
     if nt == 0 {
         return mesh.clone();
@@ -393,7 +472,7 @@ pub fn remove_small_components(
     }
 
     // Sort components descending by face count
-    components.sort_by(|a, b| b.len().cmp(&a.len()));
+    components.sort_by_key(|c| std::cmp::Reverse(c.len()));
 
     let min_count = ((nt as f32 * min_face_ratio).ceil() as usize).max(2);
 
@@ -440,7 +519,11 @@ pub fn auto_repair_mesh(mesh: &Mesh) -> (Mesh, String) {
         initial_report.inconsistent_normals,
         initial_report.component_count,
         final_report.component_count,
-        if final_report.is_watertight { "Yes" } else { "No" }
+        if final_report.is_watertight {
+            "Yes"
+        } else {
+            "No"
+        }
     );
 
     (m3, summary)
@@ -469,4 +552,36 @@ fn compact_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Mesh {
     let mut m = Mesh::from_indexed(new_positions, new_indices);
     m.recompute_normals();
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bow_tie_vertex_is_non_manifold() {
+        // Two triangles touching at vertex 0 only.
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        let m = Mesh::from_indexed(positions, vec![0, 1, 2, 0, 3, 4]);
+        assert_eq!(count_non_manifold_vertices(&m), 1);
+        let rep = analyze_mesh(&m);
+        assert_eq!(rep.non_manifold_verts, 1);
+        assert!(!rep.is_watertight);
+
+        // Two triangles sharing an edge form one fan: manifold.
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let m = Mesh::from_indexed(positions, vec![0, 1, 2, 1, 3, 2]);
+        assert_eq!(count_non_manifold_vertices(&m), 0);
+    }
 }

@@ -60,7 +60,7 @@ pub fn sample_surface_masked(
     let mut cum = Vec::with_capacity(nt + 1);
     cum.push(0.0f64);
     for t in 0..nt {
-        let is_excluded = mask.map_or(false, |m| m.get(t).copied().unwrap_or(0) > 0);
+        let is_excluded = mask.is_some_and(|m| m.get(t).copied().unwrap_or(0) > 0);
         let area = if is_excluded {
             0.0f64
         } else {
@@ -78,7 +78,7 @@ pub fn sample_surface_masked(
         let r = rng.f64() * total;
         let t = match cum.partition_point(|x| *x < r) {
             i if i >= nt => nt - 1,
-            i => i.saturating_sub(1).max(0),
+            i => i.saturating_sub(1),
         };
         let [a, b, c] = mesh.triangle(t);
         let mut u = rng.f32();
@@ -110,7 +110,7 @@ pub fn robust_sym_loss(
             let r = reflect(s, plane);
             let (_, hit_tri, dist) = bvh.closest_point(r);
             let hit_excluded =
-                mask.map_or(false, |m| m.get(hit_tri as usize).copied().unwrap_or(0) > 0);
+                mask.is_some_and(|m| m.get(hit_tri as usize).copied().unwrap_or(0) > 0);
             if hit_excluded {
                 c_sq
             } else {
@@ -140,7 +140,7 @@ pub fn compute_sym_rms(
             let r = reflect(s, plane);
             let (_, hit_tri, dist) = bvh.closest_point(r);
             let hit_excluded =
-                mask.map_or(false, |m| m.get(hit_tri as usize).copied().unwrap_or(0) > 0);
+                mask.is_some_and(|m| m.get(hit_tri as usize).copied().unwrap_or(0) > 0);
             let d2 = (dist * dist) as f64;
             if !hit_excluded && d2 <= c_sq {
                 (d2, 1usize)
@@ -335,8 +335,7 @@ pub fn detect_symmetry_from_line(
         normal: final_n,
         point: final_pt,
     };
-    let (mut refined_plane, refined_rms) =
-        refine_symmetry_masked(mesh, bvh, &initial_plane, mask);
+    let (mut refined_plane, refined_rms) = refine_symmetry_masked(mesh, bvh, &initial_plane, mask);
     if refined_plane.normal.dot(e1) < 0.0 {
         refined_plane.normal = -refined_plane.normal;
     }
@@ -473,15 +472,15 @@ pub fn detect_symmetry_masked(
             _ => best = Some((cand_plane, loss)),
         }
     }
-    best.map(|(plane, _)| {
-        refine_symmetry_masked(mesh, bvh, &plane, mask)
-    })
+    best.map(|(plane, _)| refine_symmetry_masked(mesh, bvh, &plane, mask))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn refine_symmetry(mesh: &Mesh, bvh: &Bvh, init: &SymPlane) -> (SymPlane, f64) {
     refine_symmetry_masked(mesh, bvh, init, None)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn detect_symmetry(mesh: &Mesh, bvh: &Bvh) -> Option<(SymPlane, f64)> {
     detect_symmetry_masked(mesh, bvh, None)
 }
