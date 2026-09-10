@@ -1,9 +1,11 @@
-//! Scripted demo recording (`--demo <file.mp4> <part> <scan> <large>`).
+//! Scripted demo recording (`--demo <file.mp4> <part> <scan> <large>`) and
+//! README screenshots (`--screenshots <dir> <part> <scan> <large> [extra]`).
 //!
 //! Drives the application with synthetic pointer and keyboard input on a
 //! fixed 30 fps clock, draws a cursor and captions over the interface and
-//! streams every rendered frame to `ffmpeg`, which encodes the video. The
-//! real mouse and keyboard are ignored while the demo runs.
+//! streams every rendered frame to `ffmpeg`, which encodes the video; the
+//! screenshot mode runs a shorter script and saves single frames as PNG. The
+//! real mouse and keyboard are ignored while a script runs.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -37,6 +39,16 @@ pub struct DemoAssets {
     pub scan: PathBuf,
     /// A dense mesh (decimation).
     pub large: PathBuf,
+    /// Optional second part for the overview screenshots.
+    pub extra: Option<PathBuf>,
+}
+
+/// What a scripted run produces.
+pub enum DemoMode {
+    /// A video file encoded by ffmpeg.
+    Video(PathBuf),
+    /// Single PNG frames in a directory.
+    Stills(PathBuf),
 }
 
 // ----------------------------------------------------------------------
@@ -200,6 +212,8 @@ enum Step {
         frames: u32,
     },
     Key(egui::Key, egui::Modifiers),
+    /// Save the current frame as `<name>.png` (screenshot mode only).
+    Shot(&'static str),
     /// Stop capturing, let pending frames drain, close the encoder and exit.
     Finish,
 }
@@ -400,16 +414,16 @@ fn script(assets: &DemoAssets, export_path: PathBuf) -> Vec<Step> {
             a.rotate_normal_to_axis(Vec3::Z);
             a.origin_on_plane();
         }),
-        Step::Wait(secs(0.4)),
-        key(egui::Key::F),
-        Step::Wait(secs(1.8)),
+        Step::Wait(secs(1.6)),
         // --- Hide ----------------------------------------------------------
         caption(
             "H hides the selected faces",
             "Hidden regions are non-destructive and listed in the object browser; bring them back any time. Double-click selects a whole region.",
         ),
         key(egui::Key::H),
-        Step::Wait(secs(0.4)),
+        Step::Wait(secs(0.3)),
+        key(egui::Key::F),
+        Step::Wait(secs(1.0)),
         Step::MoveTo {
             to: FREE,
             frames: secs(0.4),
@@ -542,6 +556,126 @@ fn script(assets: &DemoAssets, export_path: PathBuf) -> Vec<Step> {
     ]
 }
 
+/// Screenshot script for the README: one still per feature.
+fn stills_script(assets: &DemoAssets) -> Vec<Step> {
+    let part = assets.part.clone();
+    let scan = assets.scan.clone();
+    let large = assets.large.clone();
+    let hero = assets.extra.clone().unwrap_or_else(|| assets.part.clone());
+    let loaded = |a: &ScanApp| a.load_job.is_none() && a.has_mesh() && idle(a);
+    vec![
+        act(|a| {
+            a.theme_mode = ThemeMode::Dark;
+            a.camera.set_up_axis(UpAxis::Z);
+        }),
+        // Overview: a mechanical part, nothing else open.
+        act(move |a| a.open_file_async(hero.clone())),
+        until(loaded, 60.0),
+        Step::MoveTo {
+            to: (0.0, 0.0),
+            frames: 2,
+        },
+        Step::Wheel {
+            delta: 240.0,
+            frames: secs(0.5),
+        },
+        Step::MoveTo {
+            to: FREE,
+            frames: 2,
+        },
+        orbit((0.34, 0.27), secs(0.6)),
+        Step::Wait(secs(0.5)),
+        Step::Shot("overview"),
+        // Face groups on a CAD-like part.
+        act(move |a| a.open_file_async(part.clone())),
+        until(loaded, 60.0),
+        act(|a| {
+            a.open_section(ToolSection::FaceGroups);
+            a.request_face_groups();
+        }),
+        until(
+            |a| a.groups_job.is_none() && !a.face_groups.is_empty(),
+            60.0,
+        ),
+        Step::Wait(secs(0.5)),
+        Step::Shot("face_groups"),
+        // Plane fit from a painted selection, aligned to Z.
+        act(|a| {
+            a.groups_show = false;
+            a.brush_radius = 26.0;
+        }),
+        Step::MoveTo {
+            to: (-0.06, -0.05),
+            frames: 2,
+        },
+        paint((0.06, -0.09), secs(0.8)),
+        paint((0.02, 0.02), secs(0.6)),
+        act(|a| {
+            a.open_section(ToolSection::Coordinates);
+            a.fit_plane_from_selection();
+            a.rotate_normal_to_axis(Vec3::Z);
+            a.origin_on_plane();
+            a.clear_selection();
+        }),
+        key(egui::Key::F),
+        Step::Wait(secs(1.0)),
+        Step::Shot("plane_alignment"),
+        // Symmetry on a scan.
+        act(move |a| {
+            a.camera.set_up_axis(UpAxis::Y);
+            a.open_file_async(large.clone());
+        }),
+        until(loaded, 90.0),
+        act(|a| {
+            a.open_section(ToolSection::Symmetry);
+            a.schedule_sym_auto();
+        }),
+        until(|a| a.sym_job.is_none() && a.sym.is_some(), 90.0),
+        Step::MoveTo {
+            to: FREE,
+            frames: 2,
+        },
+        orbit((0.36, 0.30), secs(0.8)),
+        Step::Wait(secs(0.5)),
+        Step::Shot("symmetry"),
+        // Decimation heatmap on the same scan.
+        act(|a| {
+            a.open_section(ToolSection::Decimation);
+            a.dec_ratio = 0.1;
+            a.heat_on = true;
+            a.schedule_decimate();
+        }),
+        until(|a| a.dec_job.is_none() && a.preview.is_some(), 90.0),
+        until(|a| a.dev_job.is_none() && a.heat.is_some(), 90.0),
+        Step::Wait(secs(0.5)),
+        Step::Shot("decimation"),
+        act(|a| a.discard_preview()),
+        // Repair: holes of a scan.
+        act(move |a| a.open_file_async(scan.clone())),
+        until(loaded, 90.0),
+        act(|a| {
+            a.open_section(ToolSection::Repair);
+            a.request_repair_analysis();
+        }),
+        until(|a| a.analysis_job.is_none(), 90.0),
+        Step::MoveTo {
+            to: FREE,
+            frames: 2,
+        },
+        orbit((0.34, 0.16), secs(0.8)),
+        Step::Wait(secs(0.5)),
+        Step::Shot("repair"),
+        // Light theme.
+        act(|a| {
+            a.theme_mode = ThemeMode::Light;
+            a.show_wireframe = true;
+        }),
+        Step::Wait(secs(0.6)),
+        Step::Shot("light_theme"),
+        Step::Finish,
+    ]
+}
+
 // ----------------------------------------------------------------------
 // Frame encoder
 // ----------------------------------------------------------------------
@@ -664,7 +798,7 @@ impl FrameSink {
 // ----------------------------------------------------------------------
 
 pub struct DemoPlugin {
-    pub output: PathBuf,
+    pub mode: DemoMode,
     pub assets: DemoAssets,
 }
 
@@ -687,17 +821,32 @@ struct DemoState {
     /// Frames to wait after the last capture before closing the encoder.
     drain: Option<u32>,
     sink: Arc<Mutex<FrameSink>>,
-    output: PathBuf,
+    /// Video output, or `None` in screenshot mode.
+    video: Option<PathBuf>,
+    /// Screenshot directory and the pending screenshot name.
+    stills_dir: PathBuf,
+    shot: Option<&'static str>,
 }
 
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        let export_path = self.output.with_file_name("scanimprover_demo_export.stl");
+        let (video, stills_dir, steps) = match &self.mode {
+            DemoMode::Video(out) => {
+                let export_path = out.with_file_name("scanimprover_demo_export.stl");
+                (
+                    Some(out.clone()),
+                    out.parent().map(PathBuf::from).unwrap_or_default(),
+                    script(&self.assets, export_path),
+                )
+            }
+            DemoMode::Stills(dir) => (None, dir.clone(), stills_script(&self.assets)),
+        };
+        let sink_path = video.clone().unwrap_or_default();
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / FPS as f64,
         )))
         .insert_resource(DemoState {
-            steps: script(&self.assets, export_path),
+            steps,
             index: 0,
             step_frame: 0,
             frame: 0,
@@ -709,8 +858,10 @@ impl Plugin for DemoPlugin {
             recording: false,
             captured: 0,
             drain: None,
-            sink: Arc::new(Mutex::new(FrameSink::new(self.output.clone()))),
-            output: self.output.clone(),
+            sink: Arc::new(Mutex::new(FrameSink::new(sink_path))),
+            video,
+            stills_dir,
+            shot: None,
         })
         .add_systems(
             PreUpdate,
@@ -764,7 +915,7 @@ fn drive_demo(
     let have_layout = scan.frame.viewport_rect.width() > 0.0;
 
     if state.drain.is_none() && have_layout {
-        state.recording = true;
+        state.recording = state.video.is_some();
         // Instant steps chain within one frame; a timed step consumes it.
         while let Some(step) = state.steps.get(state.index) {
             let f = state.step_frame;
@@ -875,6 +1026,15 @@ fn drive_demo(
                         done = true;
                     }
                 }
+                Step::Shot(name) => {
+                    if f == 0 {
+                        state.shot = Some(name);
+                    }
+                    // Give the readback a few frames before the next change.
+                    if f >= 3 {
+                        done = true;
+                    }
+                }
                 Step::Finish => {
                     state.recording = false;
                     state.drain = Some(secs(0.5));
@@ -919,7 +1079,7 @@ fn drive_demo(
     input.events.extend(events);
 
     if let Some(d) = scan.demo.as_mut() {
-        d.cursor = have_layout.then_some(state.cursor);
+        d.cursor = (have_layout && state.video.is_some()).then_some(state.cursor);
         d.pressed = state.pressed.is_some();
         d.frame = state.frame;
     }
@@ -927,10 +1087,19 @@ fn drive_demo(
 
     if let Some(left) = state.drain {
         if left == 0 {
-            let ok = state.sink.lock().unwrap().finish();
-            if ok {
-                info!("demo video written to {}", state.output.display());
-            }
+            let ok = match &state.video {
+                Some(path) => {
+                    let ok = state.sink.lock().unwrap().finish();
+                    if ok {
+                        info!("demo video written to {}", path.display());
+                    }
+                    ok
+                }
+                None => {
+                    info!("screenshots written to {}", state.stills_dir.display());
+                    true
+                }
+            };
             exit.write(if ok {
                 AppExit::Success
             } else {
@@ -947,6 +1116,12 @@ fn drive_demo(
 /// Requests a screenshot of the frame being rendered and forwards it to the
 /// encoder when the readback completes.
 fn capture_frame(mut commands: Commands, mut state: ResMut<DemoState>) {
+    if let Some(name) = state.shot.take() {
+        let path = state.stills_dir.join(format!("{name}.png"));
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(path));
+    }
     if !state.recording {
         return;
     }

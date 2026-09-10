@@ -1,1 +1,6 @@
 /target
+
+# downloaded example meshes (see examples/fetch.sh)
+examples/*.obj
+examples/*.ply
+examples/*.stl

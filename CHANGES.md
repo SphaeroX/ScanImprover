@@ -62,7 +62,7 @@ it is called out below as an addition.
 - Dependencies are built optimised in debug profiles (`[profile.dev.package."*"] opt-level = 3`) so the debug build stays interactive.
 - Rendering is reactive (`WinitSettings::desktop_app`): frames are drawn on input, window events and egui repaint requests (animations, worker results) instead of continuously, which keeps an idle app at near-zero GPU / battery use.
 - The window starts maximized. The camera viewport is derived from egui's pixels-per-point (display scale times interface zoom), so the scene always fills the viewport.
-- `--demo <out.mp4> <part> <scan> <large>` (`src/demo.rs`) records a scripted feature tour: synthetic pointer / keyboard input on a fixed 30 fps clock, cursor and captions drawn over the interface, every frame streamed to `ffmpeg`.
+- `--demo <out.mp4> <part> <scan> <large>` (`src/demo.rs`) records a scripted feature tour: synthetic pointer / keyboard input on a fixed 30 fps clock, cursor and captions drawn over the interface, every frame streamed to `ffmpeg`. `--screenshots <dir> ...` runs a shorter script and saves the README stills; `examples/fetch.sh` downloads the public test meshes they use.
 
 ## Rendering and design
 

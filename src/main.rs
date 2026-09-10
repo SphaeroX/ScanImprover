@@ -43,31 +43,44 @@ fn main() -> bevy::app::AppExit {
         }
         args.remove(i);
     }
-    // `--demo <out.mp4> <part> <scan> <large>`: record the scripted demo.
+    // `--demo <out.mp4> <part> <scan> <large> [extra]` records the scripted
+    // demo; `--screenshots <dir> ...` saves README stills instead.
     let mut demo = None;
-    if let Some(i) = args.iter().position(|a| a == "--demo") {
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--demo" || a == "--screenshots")
+    {
+        let stills = args[i] == "--screenshots";
         let rest: Vec<std::path::PathBuf> = args
             .drain(i..)
             .skip(1)
             .map(std::path::PathBuf::from)
             .collect();
         match rest.as_slice() {
-            [out, part, scan, large, ..] => {
+            [out, part, scan, large, extra @ ..] => {
                 demo = Some(demo::DemoPlugin {
-                    output: out.clone(),
+                    mode: if stills {
+                        demo::DemoMode::Stills(out.clone())
+                    } else {
+                        demo::DemoMode::Video(out.clone())
+                    },
                     assets: demo::DemoAssets {
                         part: part.clone(),
                         scan: scan.clone(),
                         large: large.clone(),
+                        extra: extra.first().cloned(),
                     },
                 });
             }
             _ => {
-                eprintln!("usage: ScanImprover --demo <out.mp4> <part.stl> <scan.obj> <large.stl>");
+                eprintln!(
+                    "usage: ScanImprover --demo <out.mp4> <part> <scan> <large> [extra]\n       ScanImprover --screenshots <dir> <part> <scan> <large> [extra]"
+                );
                 return bevy::app::AppExit::error();
             }
         }
     }
+    let fullscreen = demo.is_some();
     let mut scan_app = ScanApp::new();
     if demo.is_some() {
         // Deterministic look regardless of the user's saved settings.
@@ -81,7 +94,7 @@ fn main() -> bevy::app::AppExit {
         }
     }
     // The demo records the whole screen; the normal window starts maximized.
-    let window_mode = if demo.is_some() {
+    let window_mode = if fullscreen {
         bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
     } else {
         bevy::window::WindowMode::Windowed
