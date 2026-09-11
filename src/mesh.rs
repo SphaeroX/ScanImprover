@@ -8,6 +8,21 @@ pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// Optional quad structure on top of the triangles (see [`QuadLayout`]).
+    pub quads: Option<QuadLayout>,
+}
+
+/// Marks the first `count` triangle pairs of a mesh as quads: quad `k`
+/// `(a, b, c, d)` is stored as triangles `2k = (a, b, c)` and
+/// `2k + 1 = (a, c, d)`. Everything after them is plain triangles.
+///
+/// The layout carries a checksum of the index buffer it was created for, so
+/// an operation that edits the triangles without knowing about quads simply
+/// invalidates it (see [`Mesh::quad_count`]) instead of producing wrong quads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuadLayout {
+    pub count: usize,
+    checksum: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -44,9 +59,35 @@ impl Mesh {
             positions,
             normals: Vec::new(),
             indices,
+            quads: None,
         };
         m.recompute_normals();
         m
+    }
+
+    /// Declares the first `count` triangle pairs to be quads (see
+    /// [`QuadLayout`]); `count == 0` removes the layout.
+    pub fn set_quad_layout(&mut self, count: usize) {
+        let count = count.min(self.triangle_count() / 2);
+        self.quads = (count > 0).then(|| QuadLayout {
+            count,
+            checksum: quad_checksum(&self.indices[..6 * count], self.positions.len()),
+        });
+    }
+
+    /// Number of valid quads at the start of the triangle list: 0 when the
+    /// mesh has no quad layout or the triangles changed since it was set.
+    pub fn quad_count(&self) -> usize {
+        match self.quads {
+            Some(q)
+                if 6 * q.count <= self.indices.len()
+                    && quad_checksum(&self.indices[..6 * q.count], self.positions.len())
+                        == q.checksum =>
+            {
+                q.count
+            }
+            _ => 0,
+        }
     }
 
     pub fn from_corners(raw: &[[f32; 3]]) -> Mesh {
@@ -262,6 +303,7 @@ impl Mesh {
             positions: kept_pos,
             normals: kept_nrm,
             indices: kept_idx,
+            quads: None,
         };
         if !has_normals && !kept_mesh.positions.is_empty() {
             kept_mesh.recompute_normals();
@@ -271,6 +313,7 @@ impl Mesh {
             positions: hidden_pos,
             normals: hidden_nrm,
             indices: hidden_idx,
+            quads: None,
         };
         if !has_normals && !hidden_mesh.positions.is_empty() {
             hidden_mesh.recompute_normals();
@@ -311,6 +354,7 @@ impl Mesh {
             positions,
             normals,
             indices,
+            quads: None,
         };
         if m.normals.is_empty() && !m.positions.is_empty() {
             m.recompute_normals();
@@ -387,6 +431,16 @@ pub fn weld_corners(raw: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
     (positions, indices)
 }
 
+/// Checksum of the quad part of an index buffer (FNV-1a over the indices,
+/// seeded with the vertex count).
+fn quad_checksum(indices: &[u32], vertex_count: usize) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ vertex_count as u64;
+    for &i in indices {
+        h = (h ^ i as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 fn weld_corners_sequential(raw: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
     let mut map: HashMap<[u32; 3], u32> = HashMap::with_capacity(raw.len() / 2);
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(raw.len() / 2);
@@ -426,6 +480,35 @@ mod tests {
         assert_eq!(pa, pb);
         assert_eq!(ia, ib);
         assert!(pa.len() <= 500);
+    }
+
+    #[test]
+    fn quad_layout_is_invalidated_by_index_edits() {
+        // Two quads side by side: (0,1,4,3) and (1,2,5,4).
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ];
+        let indices = vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4];
+        let mut m = Mesh::from_indexed(positions, indices);
+        assert_eq!(m.quad_count(), 0);
+        m.set_quad_layout(2);
+        assert_eq!(m.quad_count(), 2);
+        // Moving vertices keeps the quads.
+        m.transform(Quat::from_rotation_z(0.3), Vec3::X);
+        assert_eq!(m.quad_count(), 2);
+        // Editing triangles without updating the layout invalidates it.
+        let mut edited = m.clone();
+        edited.indices.swap(1, 2);
+        assert_eq!(edited.quad_count(), 0);
+        edited.indices.truncate(6);
+        assert_eq!(edited.quad_count(), 0);
+        m.set_quad_layout(0);
+        assert!(m.quads.is_none());
     }
 
     #[test]

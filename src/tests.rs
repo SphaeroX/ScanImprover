@@ -2185,6 +2185,7 @@ mod tests {
             ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             indices: vec![0, 1, 2, 0, 2, 3],
+            quads: None,
         };
         let bvh = Bvh::new(&plane_mesh.positions, &plane_mesh.indices);
 
@@ -2198,6 +2199,7 @@ mod tests {
             ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             indices: vec![0, 1, 2, 0, 2, 3],
+            quads: None,
         };
 
         let (heat, mean_dev, max_dev) = compute_freeform_deviation(&test_surface, &bvh);
