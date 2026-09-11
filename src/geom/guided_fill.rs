@@ -172,10 +172,13 @@ pub struct GuidedFillReport {
     /// standard fill was used (see `note`).
     pub guided: bool,
     /// Surface kind of every region of the patch (`Freeform` = faired).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub surfaces: Vec<GroupKind>,
     /// Number of rebuilt edges between two surfaces.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub creases: usize,
     /// Number of rebuilt corners (three surfaces meeting in the hole).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub corners: usize,
     /// Largest distance of a new vertex from the primitive(s) it belongs to.
     pub max_deviation: f32,
