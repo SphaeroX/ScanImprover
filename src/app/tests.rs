@@ -410,7 +410,6 @@ fn grow_and_shrink_selection_returns_to_exact_initial_point() {
     assert_eq!(app.sel_count, 1);
     assert_eq!(app.sel[0], 1);
 
-    // Grow multiple rings
     app.grow_selection();
     let count_1 = app.sel_count;
     assert!(count_1 > 1);
@@ -419,7 +418,6 @@ fn grow_and_shrink_selection_returns_to_exact_initial_point() {
     let count_2 = app.sel_count;
     assert!(count_2 > count_1);
 
-    // Shrink back ring by ring
     app.shrink_selection();
     assert_eq!(app.sel_count, count_1);
 
@@ -428,7 +426,6 @@ fn grow_and_shrink_selection_returns_to_exact_initial_point() {
     assert_eq!(app.sel[0], 1);
     assert_eq!(app.sel.iter().filter(|&&v| v > 0).count(), 1);
 
-    // Additional shrink attempts must not erase or move the initial point
     app.shrink_selection();
     assert_eq!(app.sel_count, 1);
     assert_eq!(app.sel[0], 1);
@@ -441,23 +438,19 @@ fn grow_and_shrink_selection_returns_to_exact_initial_point() {
 #[test]
 fn grow_and_shrink_near_crease_does_not_drift() {
     let mut app = app_with(box_mesh(0.0, 0.0, 0.0, 2.0));
-    // Default 45° threshold: cannot cross 90° box edges
     app.expand_angle_deg = 45.0;
     select(&mut app, &[0]);
     assert_eq!(app.sel_count, 1);
 
-    // Grow across the coplanar neighbor (triangle 1)
     app.grow_selection();
     assert_eq!(app.sel_count, 2);
     assert_eq!(app.sel[0], 1);
     assert_eq!(app.sel[1], 1);
 
-    // Shrink back: must return to triangle 0 and not drift or disappear
     app.shrink_selection();
     assert_eq!(app.sel_count, 1);
     assert_eq!(app.sel[0], 1);
 
-    // Further shrink keeps triangle 0
     app.shrink_selection();
     assert_eq!(app.sel_count, 1);
     assert_eq!(app.sel[0], 1);
@@ -470,12 +463,10 @@ fn grow_session_undo_restores_initial_selection() {
     select(&mut app, &[0]);
     let undo_count_before = app.undo.len();
 
-    // Growing multiple times only records one undo snapshot for the session
     app.grow_selection();
     app.grow_selection();
     assert_eq!(app.undo.len(), undo_count_before + 1);
 
-    // Undo restores the state before grow began
     app.undo();
     assert_eq!(app.sel_count, 1);
     assert_eq!(app.sel[0], 1);

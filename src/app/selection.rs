@@ -229,7 +229,6 @@ impl App {
         if self.sel_count == 0 {
             return;
         }
-        // 1. If we have a history of grown rings, unwind the most recent ring:
         if let Some(prev_sel) = self.sel_grow_history.pop() {
             self.sel = prev_sel;
             self.recount_sel();
@@ -238,13 +237,11 @@ impl App {
             return;
         }
 
-        // 2. If we grew from an initial selection and returned to it, stop:
         if self.sel_grow_base.is_some() {
             self.status = format!("Selection at initial state: {} faces", self.sel_count);
             return;
         }
 
-        // 3. Fallback for manual selections: do not shrink single-face selections to nothing.
         if self.sel_count <= 1 {
             return;
         }
