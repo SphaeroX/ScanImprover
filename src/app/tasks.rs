@@ -36,7 +36,7 @@ impl App {
     }
 
     /// True when the displayed mesh is large enough to justify a worker job.
-    fn prefers_async(&self) -> bool {
+    pub(super) fn prefers_async(&self) -> bool {
         self.display_tri_count() >= self.async_min_tris
     }
 
@@ -343,6 +343,7 @@ impl App {
                     Err(e) => format!("Export failed: {e}"),
                 };
             }
+            TaskOutput::Solid { result } => self.finish_solid_job(id, result),
         }
     }
 
@@ -368,6 +369,7 @@ impl App {
         if self.export_job == Some(id) {
             self.export_job = None;
         }
+        self.clear_solid_job(id);
     }
 }
 

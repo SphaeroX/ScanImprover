@@ -4,7 +4,7 @@
 use crate::app::App;
 use crate::ui::theme;
 
-pub fn render_experimental(_app: &mut App, ui: &mut egui::Ui) {
+pub fn render_experimental(app: &mut App, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(
             "Work in progress. Results may change between versions; \
@@ -13,4 +13,7 @@ pub fn render_experimental(_app: &mut App, ui: &mut egui::Ui) {
         .size(11.5)
         .color(theme::pal().text_muted),
     );
+    crate::ui::accordion::group_box(ui, Some("Solid reconstruction"), |ui| {
+        crate::ui::solid::render_solid_reconstruction(app, ui)
+    });
 }

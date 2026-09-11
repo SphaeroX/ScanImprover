@@ -10,6 +10,7 @@ pub mod repair;
 pub mod sections;
 pub mod selection_hud;
 pub mod shortcuts;
+pub mod solid;
 pub mod status_bar;
 pub mod theme;
 pub mod toolbar;

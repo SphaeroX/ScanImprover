@@ -116,6 +116,9 @@ pub enum TaskOutput {
     Exported {
         result: Result<String, String>,
     },
+    Solid {
+        result: Result<crate::geom::solid::Solid, String>,
+    },
 }
 
 pub type TaskFn = Box<dyn FnOnce(&Progress) -> TaskOutput + Send + 'static>;
