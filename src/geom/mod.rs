@@ -9,6 +9,7 @@ pub mod hole_detect;
 pub mod hole_fill;
 pub mod hole_solver;
 pub mod repair;
+pub mod retopo;
 pub mod segment;
 pub mod symmetry;
 pub mod topology;
