@@ -33,11 +33,12 @@ use crate::geom::fitting::{fit_circle_2d, fit_plane, plane_basis, solve_3x3};
 use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_fill::{
     HoleFillConfig, MeshPatch, apply_patch, ear_clip_polygon, generate_hole_patch,
+    improve_triangulation,
 };
 use crate::geom::segment::{FaceGroup, GroupKind};
 use crate::mesh::Mesh;
 use glam::{Vec2, Vec3};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Rim label of edges without a usable primitive.
 const FREE: i32 = -1;
@@ -48,6 +49,9 @@ const MIN_RUN_EDGES: usize = 2;
 const TANGENT_SIN: f32 = 0.2;
 /// Upper bound for the number of new vertices of one patch.
 const MAX_NEW_VERTICES: usize = 250_000;
+/// Largest freeform region polygon triangulated with the O(m^3) minimal
+/// area fallback.
+const MAX_DP_VERTICES: usize = 150;
 const REFINE_PASSES: usize = 24;
 const RELAX_ITERATIONS: usize = 12;
 
@@ -377,11 +381,10 @@ fn reconstruct(
     if h.is_nan() || h <= 1e-12 {
         return Err("degenerate hole".to_string());
     }
-    let scale = hole.bbox.diagonal().max(h);
     let diag = mesh.bbox().diagonal().max(1e-9);
 
     // --- 1. Rim labels --------------------------------------------------------
-    let owners = rim_edge_owners(mesh, hole);
+    let (owners, chords) = rim_topology(mesh, hole);
     let raw: Vec<i32> = owners
         .iter()
         .map(|o| o.map_or(-1, |t| group_ids[t]))
@@ -408,9 +411,67 @@ fn reconstruct(
         .map(|g| slot_of.get(g).copied().unwrap_or(FREE))
         .collect();
     merge_short_runs(&mut lab, MIN_RUN_EDGES);
-    if lab.iter().all(|&l| l == FREE) {
-        return Err("no plane, cylinder or sphere group borders the hole".to_string());
+    let input = PatchInput {
+        mesh,
+        hole,
+        rim: &rim,
+        owners: &owners,
+        chords: &chords,
+        surfs: &surfs,
+        h,
+        fair_iterations: config.fallback.smooth_iterations,
+    };
+    // A failed reconstruction (e.g. an edge curve leaving the hole next to a
+    // tiny run) is retried with the shortest run merged into its neighbours.
+    let mut first_err: Option<String> = None;
+    for _ in 0..4 {
+        if lab.iter().all(|&l| l == FREE) {
+            break;
+        }
+        match build_patch(&input, &lab) {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+        if !merge_shortest_run(&mut lab) {
+            break;
+        }
     }
+    Err(first_err
+        .unwrap_or_else(|| "no plane, cylinder or sphere group borders the hole".to_string()))
+}
+
+/// Inputs of one reconstruction attempt.
+#[derive(Clone, Copy)]
+struct PatchInput<'a> {
+    mesh: &'a Mesh,
+    hole: &'a HoleLoop,
+    /// Rim positions in loop order.
+    rim: &'a [Vec3],
+    owners: &'a [Option<usize>],
+    chords: &'a RimChords,
+    /// Primitive and face group id of every rim label.
+    surfs: &'a [(Surface, i32)],
+    h: f32,
+    fair_iterations: usize,
+}
+
+/// Builds the patch for the rim labels `lab` (creases, regions,
+/// triangulation, checks).
+fn build_patch(input: &PatchInput, lab: &[i32]) -> Result<GuidedFillResult, String> {
+    let PatchInput {
+        mesh,
+        hole,
+        rim,
+        owners,
+        chords,
+        surfs,
+        h,
+        fair_iterations,
+    } = *input;
+    let n = rim.len();
+    let scale = hole.bbox.diagonal().max(h);
     let surf_of = |l: i32| (l >= 0).then(|| surfs[l as usize].0);
     let project = |p: Vec3, a: i32, b: i32| match (surf_of(a), surf_of(b)) {
         (Some(sa), Some(sb)) => project_to_curve(p, &sa, &sb, scale),
@@ -494,7 +555,7 @@ fn reconstruct(
     }
 
     // --- 3. Regions -----------------------------------------------------------
-    let regions = trace_regions(&lab, &creases, &crease_at, corner)?;
+    let regions = trace_regions(lab, &creases, &crease_at, corner)?;
 
     // --- 4. Triangulation per region --------------------------------------------
     let mut tris: Vec<[usize; 3]> = Vec::new();
@@ -507,7 +568,7 @@ fn reconstruct(
             .map(|&k| if k < n { rim[k] } else { new_pos[k - n] })
             .collect();
         let surf = surf_of(region.label);
-        let rm = triangulate_region(&poly, surf.as_ref(), h, config.fallback.smooth_iterations)?;
+        let rm = triangulate_region(&poly, surf.as_ref(), h, fair_iterations)?;
         let m = poly.len();
         let base = new_pos.len();
         for &p in &rm.interior {
@@ -542,7 +603,7 @@ fn reconstruct(
 
     // --- 5. Checks ------------------------------------------------------------
     let point = |k: usize| if k < n { rim[k] } else { new_pos[k - n] };
-    check_patch(&tris, n, h, &point, mesh, &owners)?;
+    check_patch(&tris, h, &point, mesh, owners, chords)?;
 
     let base_nv = mesh.positions.len() as u32;
     let to_mesh = |k: usize| {
@@ -618,28 +679,39 @@ fn push_points(new_pos: &mut Vec<Vec3>, pts: Vec<Vec3>) -> Vec<usize> {
     (first..new_pos.len()).collect()
 }
 
-/// The triangle owning every rim edge (`hole.vertices[i] -> [i + 1]`).
-fn rim_edge_owners(mesh: &Mesh, hole: &HoleLoop) -> Vec<Option<usize>> {
+/// Existing mesh edges between two rim vertices that are not rim edges, as
+/// sorted loop index pairs. A patch must not add them a second time.
+type RimChords = HashSet<(usize, usize)>;
+
+/// The triangle owning every rim edge (`hole.vertices[i] -> [i + 1]`) and
+/// the mesh edges joining non-adjacent rim vertices.
+fn rim_topology(mesh: &Mesh, hole: &HoleLoop) -> (Vec<Option<usize>>, RimChords) {
     let n = hole.vertices.len();
     let mut edge_index: HashMap<(u32, u32), usize> = HashMap::with_capacity(n);
+    let mut loop_index: HashMap<u32, usize> = HashMap::with_capacity(n);
     let mut on_rim = vec![false; mesh.vertex_count()];
     for (i, &v) in hole.vertices.iter().enumerate() {
         edge_index.insert((v, hole.vertices[(i + 1) % n]), i);
+        loop_index.entry(v).or_insert(i);
         on_rim[v as usize] = true;
     }
     let mut owners = vec![None; n];
+    let mut chords = RimChords::new();
     for (t, tri) in mesh.indices.chunks_exact(3).enumerate() {
         for e in 0..3 {
             let (a, b) = (tri[e], tri[(e + 1) % 3]);
-            if on_rim[a as usize]
-                && on_rim[b as usize]
-                && let Some(&i) = edge_index.get(&(a, b))
-            {
+            if !on_rim[a as usize] || !on_rim[b as usize] {
+                continue;
+            }
+            if let Some(&i) = edge_index.get(&(a, b)) {
                 owners[i] = Some(t);
+            } else if !edge_index.contains_key(&(b, a)) {
+                let (ia, ib) = (loop_index[&a], loop_index[&b]);
+                chords.insert((ia.min(ib), ia.max(ib)));
             }
         }
     }
-    owners
+    (owners, chords)
 }
 
 /// Rim vertices inside the runs of group `gid` (both rim edges in the
@@ -789,35 +861,51 @@ fn runs_of(lab: &[i32]) -> Vec<(usize, usize)> {
     runs
 }
 
+/// Relabels run `ri` of `runs` with the label of its neighbours (the longer
+/// neighbour when those differ).
+fn absorb_run(lab: &mut [i32], runs: &[(usize, usize)], ri: usize) {
+    let (n, k) = (lab.len(), runs.len());
+    let (start, len) = runs[ri];
+    let (before, after) = (runs[(ri + k - 1) % k], runs[(ri + 1) % k]);
+    let (lb, la) = (lab[before.0], lab[after.0]);
+    let target = if lb == la || before.1 >= after.1 {
+        lb
+    } else {
+        la
+    };
+    for j in 0..len {
+        lab[(start + j) % n] = target;
+    }
+}
+
 /// Relabels runs shorter than `min_edges` (shortest first) with the label of
-/// their neighbours (the longer neighbour when those differ).
+/// their neighbours.
 fn merge_short_runs(lab: &mut [i32], min_edges: usize) {
-    let n = lab.len();
-    for _ in 0..n {
+    for _ in 0..lab.len() {
         let runs = runs_of(lab);
         if runs.len() < 2 {
             return;
         }
-        let Some((ri, &(start, len))) = runs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.1 < min_edges)
-            .min_by_key(|(_, r)| r.1)
+        let Some(ri) = (0..runs.len())
+            .filter(|&i| runs[i].1 < min_edges)
+            .min_by_key(|&i| runs[i].1)
         else {
             return;
         };
-        let k = runs.len();
-        let (before, after) = (runs[(ri + k - 1) % k], runs[(ri + 1) % k]);
-        let (lb, la) = (lab[before.0], lab[after.0]);
-        let target = if lb == la || before.1 >= after.1 {
-            lb
-        } else {
-            la
-        };
-        for j in 0..len {
-            lab[(start + j) % n] = target;
-        }
+        absorb_run(lab, &runs, ri);
     }
+}
+
+/// Merges the shortest run into its neighbours; false when only one run is
+/// left.
+fn merge_shortest_run(lab: &mut [i32]) -> bool {
+    let runs = runs_of(lab);
+    if runs.len() < 2 {
+        return false;
+    }
+    let ri = (0..runs.len()).min_by_key(|&i| runs[i].1).unwrap_or(0);
+    absorb_run(lab, &runs, ri);
+    true
 }
 
 /// Moves `p` onto the intersection curve of two surfaces (Gauss-Newton on
@@ -985,12 +1073,13 @@ fn trace_regions(
 /// loop indices, then `n + new id`).
 fn check_patch(
     tris: &[[usize; 3]],
-    n: usize,
     h: f32,
     point: &impl Fn(usize) -> Vec3,
     mesh: &Mesh,
     owners: &[Option<usize>],
+    chords: &RimChords,
 ) -> Result<(), String> {
+    let n = owners.len();
     // Directed edge -> triangle. Each rim edge i -> i + 1 must be used once,
     // backwards; every other edge exactly twice, once in each direction.
     let mut edges: HashMap<(usize, usize), usize> = HashMap::with_capacity(tris.len() * 3);
@@ -1009,6 +1098,9 @@ fn check_patch(
     for &(a, b) in edges.keys() {
         if is_rim_edge(a, b) || (!is_rim_edge(b, a) && !edges.contains_key(&(b, a))) {
             return Err("the rebuilt patch does not close the hole".to_string());
+        }
+        if a < n && b < n && chords.contains(&(a.min(b), a.max(b))) {
+            return Err("the rebuilt patch would duplicate an edge of the mesh".to_string());
         }
     }
     // The patch must continue the surface at the rim, not fold back.
@@ -1187,7 +1279,95 @@ fn in_circle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f64 {
         + (cx * cx + cy * cy) * (ax * by - bx * ay)
 }
 
+/// Triangulates a region in its surface chart. A freeform region whose
+/// polygon folds in its best-fit plane is triangulated in 3D instead.
 fn triangulate_region(
+    poly: &[Vec3],
+    surf: Option<&Surface>,
+    h: f32,
+    fair_iterations: usize,
+) -> Result<RegionMesh, String> {
+    match triangulate_in_chart(poly, surf, h, fair_iterations) {
+        Err(e) if surf.is_none() => triangulate_free_3d(poly, h, fair_iterations).ok_or(e),
+        result => result,
+    }
+}
+
+/// Freeform region without a usable flat chart: minimal-area triangulation
+/// of the 3D polygon (as the standard fill), refined with centroid splits
+/// and edge flips and faired like the Liepa fill.
+fn triangulate_free_3d(poly: &[Vec3], h: f32, fair_iterations: usize) -> Option<RegionMesh> {
+    let m = poly.len();
+    if !(3..=MAX_DP_VERTICES).contains(&m) {
+        return None;
+    }
+    let mut tris = min_area_triangulation(poly);
+    let mut pts = poly.to_vec();
+    let target = 0.866 * h * h;
+    for _ in 0..REFINE_PASSES {
+        let mut split = false;
+        let mut next = Vec::with_capacity(tris.len() * 2);
+        for t in tris {
+            let [a, b, c] = t.map(|i| pts[i]);
+            if (b - a).cross(c - a).length() * 0.5 > target {
+                let ci = pts.len();
+                pts.push((a + b + c) / 3.0);
+                next.extend_from_slice(&[[t[0], t[1], ci], [t[1], t[2], ci], [t[2], t[0], ci]]);
+                split = true;
+            } else {
+                next.push(t);
+            }
+        }
+        tris = next;
+        improve_triangulation(&mut tris, &pts, m);
+        if pts.len() - m > MAX_NEW_VERTICES {
+            return None;
+        }
+        if !split {
+            break;
+        }
+    }
+    let mut interior = pts[m..].to_vec();
+    fair(&mut interior, poly, &tris, fair_iterations);
+    Some(RegionMesh { interior, tris })
+}
+
+/// Minimal-area triangulation of a closed 3D polygon (Barequet-Sharir
+/// dynamic programming); the triangles follow the polygon orientation.
+fn min_area_triangulation(p: &[Vec3]) -> Vec<[usize; 3]> {
+    let m = p.len();
+    let mut cost = vec![0.0f32; m * m];
+    let mut split = vec![0usize; m * m];
+    for len in 2..m {
+        for i in 0..m - len {
+            let j = i + len;
+            let mut best = (f32::MAX, i + 1);
+            for k in i + 1..j {
+                let area = (p[k] - p[i]).cross(p[j] - p[i]).length() * 0.5;
+                let c = cost[i * m + k] + cost[k * m + j] + area;
+                if c < best.0 {
+                    best = (c, k);
+                }
+            }
+            cost[i * m + j] = best.0;
+            split[i * m + j] = best.1;
+        }
+    }
+    let mut tris = Vec::with_capacity(m - 2);
+    let mut stack = vec![(0, m - 1)];
+    while let Some((i, j)) = stack.pop() {
+        if i + 1 >= j {
+            continue;
+        }
+        let k = split[i * m + j];
+        tris.push([i, k, j]);
+        stack.push((i, k));
+        stack.push((k, j));
+    }
+    tris
+}
+
+fn triangulate_in_chart(
     poly: &[Vec3],
     surf: Option<&Surface>,
     h: f32,
@@ -1518,6 +1698,29 @@ pub(crate) mod fixtures {
         Mesh::from_indexed(pos, idx)
     }
 
+    /// Flat plate (z = 0 for x <= 10) folding up along x = 10 into a wavy,
+    /// freeform flank.
+    pub(crate) fn bent_sheet() -> Mesh {
+        let (nx, ny) = (20usize, 12usize);
+        let mut pos = Vec::new();
+        for j in 0..=ny {
+            for i in 0..=nx {
+                let (x, y) = (i as f32, j as f32);
+                let d = (x - 10.0).max(0.0);
+                pos.push([x, y, 1.2 * d + 0.05 * d * d * (y * 0.5).sin()]);
+            }
+        }
+        let mut idx = Vec::new();
+        for j in 0..ny {
+            for i in 0..nx {
+                let a = (j * (nx + 1) + i) as u32;
+                let (b, c, d) = (a + 1, a + (nx + 1) as u32, a + (nx + 2) as u32);
+                idx.extend_from_slice(&[a, b, d, a, d, c]);
+            }
+        }
+        Mesh::from_indexed(pos, idx)
+    }
+
     /// Removes the triangles whose centroid lies within `radius` of `center`
     /// (unused vertices are dropped).
     pub(crate) fn cut_hole(mesh: &Mesh, center: Vec3, radius: f32) -> Mesh {
@@ -1833,5 +2036,105 @@ mod tests {
         let mut single = vec![5, 5, 6];
         merge_short_runs(&mut single, 2);
         assert_eq!(single, vec![5, 5, 5]);
+    }
+
+    #[test]
+    fn hole_between_a_plane_and_a_freeform_keeps_the_plane_exact() {
+        let at = Vec3::new(10.0, 6.0, 0.0);
+        let mesh = cut_hole(&bent_sheet(), at, 2.3);
+        let (res, filled) = guided_fill(&mesh, at);
+        assert!(res.report.guided, "{}", res.report.note);
+        let mut kinds = res.report.surfaces.clone();
+        kinds.sort_by_key(|k| *k as u8);
+        assert_eq!(kinds, vec![GroupKind::Plane, GroupKind::Freeform]);
+        assert_eq!(res.report.creases, 1);
+        // Triangles of the plate group lie exactly on z = 0, the freeform part
+        // is faired.
+        let pos = |k: u32| Vec3::from(res.patch.preview_positions[k as usize]);
+        let (mut on_plate, mut free) = (0, 0);
+        for (t, &gid) in res
+            .patch
+            .preview_indices
+            .chunks_exact(3)
+            .zip(&res.tri_groups)
+        {
+            if gid >= 0 {
+                on_plate += 1;
+                assert!(t.iter().all(|&k| pos(k).z.abs() < 1e-4));
+            } else {
+                free += 1;
+            }
+        }
+        assert!(on_plate > 0 && free > 0, "{on_plate} / {free}");
+        let health = analyze_mesh(&filled);
+        assert_eq!(health.non_manifold_edges, 0);
+        assert_eq!(health.inconsistent_normals, 0);
+        assert_eq!(detect_holes(&filled).len(), detect_holes(&mesh).len() - 1);
+    }
+
+    #[test]
+    fn freeform_regions_fall_back_to_a_3d_triangulation() {
+        // A saddle-shaped polygon folds in every plane; the 3D path closes it.
+        let poly: Vec<Vec3> = (0..12)
+            .map(|i| {
+                let a = std::f32::consts::TAU * i as f32 / 12.0;
+                Vec3::new(a.cos() * 3.0, a.sin() * 3.0, 2.5 * (2.0 * a).cos())
+            })
+            .collect();
+        let rm = triangulate_region(&poly, None, 0.8, 20).expect("triangulated");
+        assert!(!rm.interior.is_empty());
+        assert_eq!(rm.tris.len(), poly.len() + 2 * rm.interior.len() - 2);
+    }
+
+    /// Robustness check on a real CAD mesh: holes of 2.5 % of the size cut
+    /// at 80 places of `examples/fandisk.obj` (run `examples/fetch.sh`,
+    /// then `cargo test --release -- --ignored fandisk`). Every guided patch
+    /// must close its hole manifold and consistently wound.
+    #[test]
+    #[ignore = "needs examples/fandisk.obj (examples/fetch.sh)"]
+    fn fandisk_holes_rebuild_cleanly() {
+        let path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fandisk.obj"));
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipped: {} not found", path.display());
+            return;
+        };
+        let mesh = crate::io::load_any(path, &bytes).unwrap();
+        let diag = mesh.bbox().diagonal();
+        let (mut guided, mut fallback) = (0, 0);
+        let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+        let mut max_dev = 0f32;
+        for k in 0..80 {
+            let at = Vec3::from(mesh.positions[(k * 7919) % mesh.vertex_count()]);
+            let holey = cut_hole(&mesh, at, diag * 0.025);
+            let before = detect_holes(&holey).len();
+            let (res, filled) = guided_fill(&holey, at);
+            if !res.report.guided {
+                fallback += 1;
+                *reasons.entry(res.report.note).or_default() += 1;
+                continue;
+            }
+            guided += 1;
+            max_dev = max_dev.max(res.report.max_deviation);
+            let health = analyze_mesh(&filled);
+            assert_eq!(
+                health.non_manifold_edges, 0,
+                "at {at:?}: {}",
+                res.report.note
+            );
+            assert_eq!(
+                health.inconsistent_normals, 0,
+                "at {at:?}: {}",
+                res.report.note
+            );
+            assert_eq!(detect_holes(&filled).len() + 1, before, "at {at:?}");
+        }
+        eprintln!(
+            "fandisk: {guided} guided, {fallback} standard fill, max dev {max_dev:e} (diag {diag})"
+        );
+        for (reason, count) in reasons {
+            eprintln!("  standard fill {count}x: {reason}");
+        }
+        assert!(guided >= 40, "only {guided} of 80 holes were rebuilt");
     }
 }
