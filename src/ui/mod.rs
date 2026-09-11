@@ -7,6 +7,7 @@ pub mod experimental;
 pub mod gizmo;
 pub mod object_browser;
 pub mod repair;
+pub mod retopo;
 pub mod sections;
 pub mod selection_hud;
 pub mod shortcuts;
