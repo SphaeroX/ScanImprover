@@ -5,6 +5,7 @@ pub mod alignment;
 pub mod bridge;
 pub mod experimental;
 pub mod gizmo;
+pub mod guided_fill;
 pub mod object_browser;
 pub mod repair;
 pub mod sections;
