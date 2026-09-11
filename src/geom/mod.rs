@@ -5,6 +5,7 @@ pub mod bvh;
 pub mod distance;
 pub mod fitting;
 pub mod freeform;
+pub mod guided_fill;
 pub mod hole_detect;
 pub mod hole_fill;
 pub mod hole_solver;

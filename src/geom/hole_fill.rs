@@ -286,7 +286,7 @@ fn fill_ear_clipping(mesh: &Mesh, hole: &HoleLoop, _base_nv: u32) -> Result<Mesh
     })
 }
 
-fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
+pub(crate) fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
     let n = poly.len();
     if n < 3 {
         return Err("Cannot triangulate polygon with < 3 vertices".to_string());
