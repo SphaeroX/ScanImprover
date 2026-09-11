@@ -82,6 +82,7 @@ impl App {
     }
 
     pub(crate) fn clear_selection(&mut self) {
+        self.reset_selection_grow_history();
         if self.sel_count == 0 && self.selection_valid() {
             return;
         }
@@ -99,6 +100,7 @@ impl App {
         if !self.selection_valid() {
             return;
         }
+        self.reset_selection_grow_history();
         self.push_snapshot();
         let hidden = self.hidden_mask.clone();
         let sel = Arc::make_mut(&mut self.sel);
@@ -145,6 +147,7 @@ impl App {
         if changes.is_empty() {
             return false;
         }
+        self.reset_selection_grow_history();
         if self.stroke_snapshot_pending {
             self.push_snapshot();
             self.stroke_snapshot_pending = false;
@@ -202,20 +205,47 @@ impl App {
         if self.sel_count == 0 {
             return;
         }
-        if let Some(topo) = self.ensure_topology() {
-            self.push_snapshot();
-            let angle_rad = self.expand_angle_deg.to_radians();
-            let new_sel = grow_selection(&topo, &self.sel, angle_rad);
-            self.commit_selection(new_sel);
-            self.status = format!(
-                "Selection expanded (crease threshold: {:.1}°): {} faces",
-                self.expand_angle_deg, self.sel_count
-            );
+        let Some(topo) = self.ensure_topology() else {
+            return;
+        };
+        let angle_rad = self.expand_angle_deg.to_radians();
+        let new_sel = grow_selection(&topo, &self.sel, angle_rad);
+        if new_sel == *self.sel {
+            return;
         }
+        if self.sel_grow_base.is_none() {
+            self.push_snapshot();
+            self.sel_grow_base = Some(self.sel.clone());
+        }
+        self.sel_grow_history.push(self.sel.clone());
+        self.commit_selection(new_sel);
+        self.status = format!(
+            "Selection expanded (crease threshold: {:.1}°): {} faces",
+            self.expand_angle_deg, self.sel_count
+        );
     }
 
     pub(crate) fn shrink_selection(&mut self) {
         if self.sel_count == 0 {
+            return;
+        }
+        // 1. If we have a history of grown rings, unwind the most recent ring:
+        if let Some(prev_sel) = self.sel_grow_history.pop() {
+            self.sel = prev_sel;
+            self.recount_sel();
+            self.mark_selection_changed();
+            self.status = format!("Selection shrunk: {} faces", self.sel_count);
+            return;
+        }
+
+        // 2. If we grew from an initial selection and returned to it, stop:
+        if self.sel_grow_base.is_some() {
+            self.status = format!("Selection at initial state: {} faces", self.sel_count);
+            return;
+        }
+
+        // 3. Fallback for manual selections: do not shrink single-face selections to nothing.
+        if self.sel_count <= 1 {
             return;
         }
         if let Some(topo) = self.ensure_topology() {
@@ -491,6 +521,7 @@ impl App {
         } else {
             0
         };
+        self.reset_selection_grow_history();
         self.push_snapshot();
         let mut sel = if additive && self.sel.len() == tris {
             (*self.sel).clone()
@@ -587,6 +618,7 @@ impl App {
         if region.is_empty() {
             return;
         }
+        self.reset_selection_grow_history();
         self.push_snapshot();
         let additive = self.group_sel_additive && self.sel.len() == tris;
         let mut sel = if additive {
