@@ -8,6 +8,7 @@ pub mod object_browser;
 pub mod repair;
 pub mod sections;
 pub mod selection_hud;
+pub mod settings;
 pub mod shortcuts;
 pub mod status_bar;
 pub mod theme;

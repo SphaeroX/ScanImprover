@@ -307,6 +307,9 @@ pub struct App {
     // --- View / UI state ----------------------------------------------------
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
+    pub(crate) show_settings: bool,
+    /// Center freshly loaded meshes at the origin (persistent setting).
+    pub(crate) auto_center_on_load: bool,
     pub(crate) show_wireframe: bool,
     pub(crate) show_bbox: bool,
     pub(crate) show_triad: bool,
@@ -444,6 +447,8 @@ impl App {
             bridge_cluster_cache: None,
             show_mesh: true,
             show_object_browser: true,
+            show_settings: false,
+            auto_center_on_load: true,
             show_wireframe: false,
             show_bbox: true,
             show_triad: true,
@@ -492,6 +497,7 @@ impl App {
         self.brush_radius = s.brush_radius;
         self.open_sections = s.open_sections.clone();
         self.active_section = self.open_sections.last().copied();
+        self.auto_center_on_load = s.auto_center_on_load;
     }
 
     pub(crate) fn settings(&self) -> crate::settings::Settings {
@@ -508,6 +514,7 @@ impl App {
             brush_connected: self.brush_connected,
             brush_radius: self.brush_radius,
             open_sections: self.open_sections.clone(),
+            auto_center_on_load: self.auto_center_on_load,
         }
     }
 
@@ -698,6 +705,7 @@ impl App {
             .show(ui, |ui| {
                 self.viewport(ui);
             });
+        crate::ui::settings::render_settings_window(self, ctx);
 
         if self.camera.is_animating() {
             ctx.request_repaint();
