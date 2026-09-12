@@ -401,3 +401,76 @@ fn failed_task_clears_its_job_slot() {
     pump_until(&mut app, |a| a.export_job.is_none());
     assert!(app.status.contains("failed"), "{}", app.status);
 }
+
+#[test]
+fn grow_and_shrink_selection_returns_to_exact_initial_point() {
+    let mut app = app_with(box_mesh(0.0, 0.0, 0.0, 2.0));
+    app.expand_angle_deg = 180.0;
+    select(&mut app, &[0]);
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+
+    app.grow_selection();
+    let count_1 = app.sel_count;
+    assert!(count_1 > 1);
+
+    app.grow_selection();
+    let count_2 = app.sel_count;
+    assert!(count_2 > count_1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, count_1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+    assert_eq!(app.sel.iter().filter(|&&v| v > 0).count(), 1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+}
+
+#[test]
+fn grow_and_shrink_near_crease_does_not_drift() {
+    let mut app = app_with(box_mesh(0.0, 0.0, 0.0, 2.0));
+    app.expand_angle_deg = 45.0;
+    select(&mut app, &[0]);
+    assert_eq!(app.sel_count, 1);
+
+    app.grow_selection();
+    assert_eq!(app.sel_count, 2);
+    assert_eq!(app.sel[0], 1);
+    assert_eq!(app.sel[1], 1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+
+    app.shrink_selection();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+}
+
+#[test]
+fn grow_session_undo_restores_initial_selection() {
+    let mut app = app_with(box_mesh(0.0, 0.0, 0.0, 2.0));
+    app.expand_angle_deg = 180.0;
+    select(&mut app, &[0]);
+    let undo_count_before = app.undo.len();
+
+    app.grow_selection();
+    app.grow_selection();
+    assert_eq!(app.undo.len(), undo_count_before + 1);
+
+    app.undo();
+    assert_eq!(app.sel_count, 1);
+    assert_eq!(app.sel[0], 1);
+    assert!(app.sel_grow_base.is_none());
+    assert!(app.sel_grow_history.is_empty());
+}
+

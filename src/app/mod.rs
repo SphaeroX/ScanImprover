@@ -208,6 +208,10 @@ pub struct App {
     /// Restrict the brush to faces connected to the face under the cursor.
     pub(crate) brush_connected: bool,
     pub(crate) expand_angle_deg: f32,
+    /// Ring history for reversible grow/shrink operations.
+    pub(crate) sel_grow_history: Vec<Arc<Vec<u8>>>,
+    /// Base selection before the current grow sequence began.
+    pub(crate) sel_grow_base: Option<Arc<Vec<u8>>>,
     pub(crate) hidden_regions: Vec<HiddenRegion>,
     pub(crate) hidden_mask: Vec<bool>,
 
@@ -367,6 +371,8 @@ impl App {
             brush_radius: 25.0,
             brush_connected: true,
             expand_angle_deg: 45.0,
+            sel_grow_history: Vec::new(),
+            sel_grow_base: None,
             hidden_regions: Vec::new(),
             hidden_mask: Vec::new(),
             bvh: None,
@@ -589,8 +595,15 @@ impl App {
         }
     }
 
+    /// Clears the reversible grow/shrink ring history and base state.
+    pub(crate) fn reset_selection_grow_history(&mut self) {
+        self.sel_grow_history.clear();
+        self.sel_grow_base = None;
+    }
+
     /// Resets the selection to "nothing selected" for the displayed mesh.
     pub(crate) fn reset_selection(&mut self) {
+        self.reset_selection_grow_history();
         let tris = self.display().map(|m| m.triangle_count()).unwrap_or(0);
         self.sel = Arc::new(vec![0u8; tris]);
         self.sel_count = 0;
