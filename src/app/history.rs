@@ -85,6 +85,7 @@ impl App {
         self.mark_mesh_changed();
         self.update_hidden_mask();
         self.recount_sel();
+        self.reset_selection_grow_history();
         self.mark_selection_changed();
         self.sync_bbox();
     }
