@@ -20,6 +20,8 @@ pub struct Settings {
     pub brush_connected: bool,
     pub brush_radius: f32,
     pub open_sections: Vec<ToolSection>,
+    /// Move a loaded mesh so its bounding box center sits at the origin.
+    pub auto_center_on_load: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +39,7 @@ impl Default for Settings {
             brush_connected: true,
             brush_radius: 25.0,
             open_sections: Vec::new(),
+            auto_center_on_load: true,
         }
     }
 }
@@ -74,7 +77,7 @@ impl Settings {
     pub fn serialize(&self) -> String {
         let sections: Vec<&str> = self.open_sections.iter().map(|s| s.key()).collect();
         format!(
-            "left_panel_width={}\nright_panel_width={}\ntheme={}\nup_axis={}\nshow_grid={}\nshow_bbox={}\nshow_triad={}\nshow_wireframe={}\nshow_object_browser={}\nbrush_connected={}\nbrush_radius={}\nopen_sections={}\n",
+            "left_panel_width={}\nright_panel_width={}\ntheme={}\nup_axis={}\nshow_grid={}\nshow_bbox={}\nshow_triad={}\nshow_wireframe={}\nshow_object_browser={}\nbrush_connected={}\nbrush_radius={}\nopen_sections={}\nauto_center_on_load={}\n",
             self.left_panel_width,
             self.right_panel_width,
             match self.theme {
@@ -92,7 +95,8 @@ impl Settings {
             self.show_object_browser,
             self.brush_connected,
             self.brush_radius,
-            sections.join(",")
+            sections.join(","),
+            self.auto_center_on_load
         )
     }
 
@@ -137,6 +141,7 @@ impl Settings {
                 "open_sections" => {
                     s.open_sections = v.split(',').filter_map(ToolSection::from_key).collect();
                 }
+                "auto_center_on_load" => s.auto_center_on_load = flag(v),
                 _ => {}
             }
         }
@@ -163,8 +168,11 @@ mod tests {
             brush_connected: false,
             brush_radius: 40.0,
             open_sections: vec![ToolSection::Repair, ToolSection::Decimation],
+            auto_center_on_load: false,
         };
         assert_eq!(Settings::parse(&s.serialize()), s);
+        // Files written before an option existed keep its default.
+        assert!(Settings::parse("theme=light\n").auto_center_on_load);
         let clamped =
             Settings::parse("left_panel_width=10\nbrush_radius=9999\nbogus=1\ntheme=purple\n");
         assert_eq!(clamped.left_panel_width, 290.0);

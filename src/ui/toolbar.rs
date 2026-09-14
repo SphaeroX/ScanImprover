@@ -40,6 +40,10 @@ pub fn render_toolbar(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
+        // Early in the bar so it stays visible when the toolbar overflows.
+        if tool_button(ui, "Settings", "Preferences kept between sessions", true).clicked() {
+            app.show_settings = !app.show_settings;
+        }
 
         vsep(ui);
 

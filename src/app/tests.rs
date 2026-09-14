@@ -68,6 +68,19 @@ fn loading_a_new_mesh_resets_the_hidden_mask() {
 }
 
 #[test]
+fn auto_center_on_load_can_be_turned_off() {
+    let mut app = App::new();
+    assert!(app.auto_center_on_load, "centering stays the default");
+    app.install_loaded_mesh(PathBuf::from("a.stl"), box_mesh(10.0, 0.0, -4.0, 2.0));
+    assert!(app.bbox.center().length() < 1e-5);
+
+    app.auto_center_on_load = false;
+    app.install_loaded_mesh(PathBuf::from("b.stl"), box_mesh(10.0, 0.0, -4.0, 2.0));
+    assert!((app.bbox.center() - Vec3::new(10.0, 0.0, -4.0)).length() < 1e-5);
+    assert!(app.status.contains("Original coordinates kept"), "{}", app.status);
+}
+
+#[test]
 fn decimation_preview_does_not_inherit_hidden_faces() {
     let mut app = app_with(box_mesh(0.0, 0.0, 0.0, 2.0));
     select(&mut app, &[0, 1, 2]);

@@ -32,11 +32,14 @@ impl App {
         }
     }
 
-    /// Makes a freshly parsed mesh the document (centered at the origin).
+    /// Makes a freshly parsed mesh the document (centered at the origin when
+    /// the auto-center setting is on).
     pub(crate) fn install_loaded_mesh(&mut self, path: PathBuf, mut mesh: Mesh) {
-        let center = mesh.bbox().center();
-        if center.length_squared() > 1e-10 {
-            mesh.transform(Quat::IDENTITY, -center);
+        if self.auto_center_on_load {
+            let center = mesh.bbox().center();
+            if center.length_squared() > 1e-10 {
+                mesh.transform(Quat::IDENTITY, -center);
+            }
         }
         let tris = mesh.triangle_count();
         let verts = mesh.vertex_count();
@@ -53,9 +56,12 @@ impl App {
         self.reset_selection();
         self.update_hidden_mask();
         self.camera.fit(&self.bbox);
-        self.status = format!(
-            "Loaded: {tris} triangles, {verts} vertices (welded). Centered at global origin."
-        );
+        let placement = if self.auto_center_on_load {
+            "Centered at global origin."
+        } else {
+            "Original coordinates kept."
+        };
+        self.status = format!("Loaded: {tris} triangles, {verts} vertices (welded). {placement}");
     }
 
     /// Clears everything that belongs to the previously loaded document.
