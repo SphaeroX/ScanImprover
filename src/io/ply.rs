@@ -365,9 +365,12 @@ fn load_ascii(body: &[u8], elems: &[Elem]) -> Result<Mesh, String> {
 pub fn save(mesh: &Mesh) -> Vec<u8> {
     let nv = mesh.positions.len();
     let nt = mesh.triangle_count();
+    // Quads (see `QuadLayout`) are written as real 4-sided faces.
+    let quads = mesh.quad_count();
+    let nf = nt - quads;
     let mut out = Vec::with_capacity(1024 + nv * 24 + nt * 13);
     let header = format!(
-        "ply\nformat binary_little_endian 1.0\nelement vertex {nv}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nelement face {nt}\nproperty list uchar int vertex_indices\nend_header\n"
+        "ply\nformat binary_little_endian 1.0\nelement vertex {nv}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nelement face {nf}\nproperty list uchar int vertex_indices\nend_header\n"
     );
     out.extend_from_slice(header.as_bytes());
     for (p, n) in mesh.positions.iter().zip(mesh.normals.iter()) {
@@ -375,7 +378,13 @@ pub fn save(mesh: &Mesh) -> Vec<u8> {
             out.extend_from_slice(&v.to_le_bytes());
         }
     }
-    for t in 0..nt {
+    for q in 0..quads {
+        out.push(4);
+        for k in [0, 1, 2, 5] {
+            out.extend_from_slice(&mesh.indices[6 * q + k].to_le_bytes());
+        }
+    }
+    for t in 2 * quads..nt {
         out.push(3);
         for k in 0..3 {
             out.extend_from_slice(&mesh.indices[3 * t + k].to_le_bytes());
@@ -401,6 +410,26 @@ mod tests {
         assert!(load(b"not a ply").is_err());
         assert!(load(b"ply\nformat binary_big_endian 1.0\nend_header\n").is_err());
         assert!(load(b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nend_header\n0 0\n").is_err());
+    }
+
+    #[test]
+    fn quads_are_written_as_quads_and_load_back() {
+        let mut m = Mesh::from_indexed(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ],
+            vec![0, 1, 2, 0, 2, 3, 1, 4, 2],
+        );
+        m.set_quad_layout(1);
+        let bytes = save(&m);
+        let header = String::from_utf8_lossy(&bytes[..200]);
+        assert!(header.contains("element face 2\n"), "{header}");
+        let back = load(&bytes).unwrap();
+        assert_eq!(back.indices, m.indices);
     }
 
     #[test]

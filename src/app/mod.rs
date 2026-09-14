@@ -9,6 +9,7 @@
 //! * [`features`]  – symmetry plane, fitted planes / circles / freeforms, alignment
 //! * [`selection`] – face selection, hidden regions, face groups
 //! * [`repair`]    – hole detection / filling, contour bridges, repair tools
+//! * [`retopo`]    – experimental quad retopology
 //! * [`viewport`]  – 3D viewport input handling and overlay generation
 //! * [`overlay`]   – line / fill primitive builders for the viewport
 
@@ -16,6 +17,7 @@ mod features;
 mod history;
 pub(crate) mod overlay;
 mod repair;
+mod retopo;
 mod selection;
 mod session;
 mod tasks;
@@ -37,6 +39,7 @@ use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_fill::{HoleFillConfig, MeshPatch};
 use crate::geom::hole_solver::CircleGuideMode;
 use crate::geom::repair::MeshHealthReport;
+use crate::geom::retopo::RetopoParams;
 use crate::geom::segment::{FaceGroup, GroupKind};
 use crate::geom::symmetry::SymPlane;
 use crate::geom::topology::MeshTopology;
@@ -254,6 +257,14 @@ pub struct App {
     pub(crate) heat_on: bool,
     pub(crate) heat_max: f32,
 
+    // --- Quad retopology (experimental) -------------------------------------
+    /// Settings of the quad retopology tool (`target_faces == 0`: automatic).
+    pub(crate) retopo: RetopoParams,
+    /// Worker job of the running retopology (it runs as the `edit_job`).
+    pub(crate) retopo_job: Option<u64>,
+    /// (mesh generation, surface area) for the edge length readout.
+    pub(crate) retopo_area: Option<(u64, f32)>,
+
     // --- Symmetry -----------------------------------------------------------
     pub(crate) mode: Mode,
     pub(crate) sym: Option<SymState>,
@@ -405,6 +416,9 @@ impl App {
             heat: None,
             heat_on: false,
             heat_max: 1.0,
+            retopo: RetopoParams::default(),
+            retopo_job: None,
+            retopo_area: None,
             mode: Mode::Orbit,
             sym: None,
             sym_pick: Vec::new(),
