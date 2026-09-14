@@ -498,6 +498,7 @@ impl App {
                 push_line(&mut depth_lines, Vec3::from(*a), Vec3::from(*b), edge_col);
             }
         }
+        self.solid_overlay(&mut depth_lines, &mut overlay_lines);
 
         // Symmetry line picking markers.
         if self.mode == Mode::SymPickLine

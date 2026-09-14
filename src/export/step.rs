@@ -449,7 +449,7 @@ pub fn generate_step(
 }
 
 /// Distinct knots + multiplicities of a full (repeating) knot vector.
-fn knot_summary(full: &[f64]) -> (Vec<f64>, Vec<u32>) {
+pub(super) fn knot_summary(full: &[f64]) -> (Vec<f64>, Vec<u32>) {
     let mut knots: Vec<f64> = Vec::new();
     let mut mult: Vec<u32> = Vec::new();
     for &k in full {
@@ -467,7 +467,7 @@ fn knot_summary(full: &[f64]) -> (Vec<f64>, Vec<u32>) {
     (knots, mult)
 }
 
-fn write_real_list(out: &mut String, values: &[f64]) {
+pub(super) fn write_real_list(out: &mut String, values: &[f64]) {
     out.push('(');
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
@@ -478,7 +478,7 @@ fn write_real_list(out: &mut String, values: &[f64]) {
     out.push(')');
 }
 
-fn write_int_list(out: &mut String, values: &[u32]) {
+pub(super) fn write_int_list(out: &mut String, values: &[u32]) {
     out.push('(');
     for (i, v) in values.iter().enumerate() {
         if i > 0 {

@@ -18,12 +18,14 @@ pub(crate) mod overlay;
 mod repair;
 mod selection;
 mod session;
+mod solid;
 mod tasks;
 #[cfg(test)]
 mod tests;
 mod viewport;
 
 pub(crate) use history::Snapshot;
+pub(crate) use solid::SOLID_EDGE_COLORS;
 pub(crate) use tasks::MeshEditKind;
 
 use crate::camera::Camera;
@@ -308,6 +310,9 @@ pub struct App {
     pub(crate) bridge_status: Option<String>,
     pub(crate) bridge_cluster_cache: Option<BridgeClusterCache>,
 
+    // --- Experimental -------------------------------------------------------
+    pub(crate) solid: solid::SolidState,
+
     // --- View / UI state ----------------------------------------------------
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
@@ -448,6 +453,7 @@ impl App {
             bridge_preview_patch: None,
             bridge_status: None,
             bridge_cluster_cache: None,
+            solid: solid::SolidState::default(),
             show_mesh: true,
             show_object_browser: true,
             show_wireframe: false,

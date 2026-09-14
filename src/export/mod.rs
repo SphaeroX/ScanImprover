@@ -1,6 +1,7 @@
 pub mod dxf;
 pub mod fusion_script;
 pub mod step;
+pub mod step_solid;
 
 use crate::geom::fitting::{FittedCircle, FittedPlane};
 use crate::geom::freeform::FittedFreeform;
@@ -179,6 +180,31 @@ pub fn export_all_references_dialog(
         "Exported {} plane(s) and {} circle(s) to {}",
         visible_planes.len(),
         visible_circles.len(),
+        path.display()
+    ))
+}
+
+/// Prompts the user to save a reconstructed solid as a STEP B-Rep
+/// (MANIFOLD_SOLID_BREP).
+pub fn export_solid_dialog(
+    solid: &crate::geom::solid::Solid,
+    name: &str,
+) -> Result<String, String> {
+    let default_filename = format!("{}_solid.step", sanitize_filename(name));
+    let file_path = rfd::FileDialog::new()
+        .add_filter("STEP CAD Solid (*.step, *.stp)", &["step", "stp"])
+        .set_file_name(&default_filename)
+        .save_file();
+    let Some(path) = file_path else {
+        return Ok("Export cancelled.".to_string());
+    };
+    let content = step_solid::generate_solid_step(name, solid);
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(format!(
+        "Exported solid ({} faces, {} edges) to {}",
+        solid.faces.len(),
+        solid.edges.len(),
         path.display()
     ))
 }

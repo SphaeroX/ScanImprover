@@ -10,5 +10,6 @@ pub mod hole_fill;
 pub mod hole_solver;
 pub mod repair;
 pub mod segment;
+pub mod solid;
 pub mod symmetry;
 pub mod topology;
