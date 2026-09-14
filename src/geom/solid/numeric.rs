@@ -3,6 +3,7 @@
 //! intersection of several surfaces.
 
 use super::surface::Surface;
+use crate::geom::fitting::eigen_3x3;
 use glam::DVec3;
 
 /// Solves the dense system `a x = b` (Gaussian elimination with partial
@@ -189,14 +190,22 @@ pub(super) fn basis_ders(knots: &[f64], span: usize, deg: usize, t: f64) -> (Vec
     (n, d)
 }
 
-/// Moves `p0` onto the common intersection of the surfaces (Gauss–Newton on
-/// the signed distances, minimum-norm steps, so the result stays close to
-/// `p0` where the intersection is a curve or a surface). Returns the point
-/// and the largest remaining distance to any of the surfaces.
+/// Directions whose `JᵀJ` eigenvalue is below this fraction of the largest
+/// are left alone by [`project_onto`] (two unit normals less than ~3.6°
+/// apart, or three almost coplanar normals).
+const WEAK_DIRECTION: f64 = 1e-3;
+
+/// Moves `p0` onto the common intersection of the surfaces. Gauss–Newton on
+/// the signed distances with the pseudo-inverse of `JᵀJ`, so the result
+/// stays close to `p0` where the intersection is a curve or a surface, and
+/// along any direction the surfaces barely constrain: at a corner where a
+/// face split by a shallow crease meets a third face, the exact common point
+/// can lie far away, and the corner stays next to the mesh with a small gap
+/// instead. Returns the point and the largest remaining distance to any of
+/// the surfaces.
 pub(super) fn project_onto(surfs: &[&Surface], p0: DVec3, max_step: f64) -> (DVec3, f64) {
     let mut x = p0;
-    let k = surfs.len();
-    if k == 0 {
+    if surfs.is_empty() {
         return (x, 0.0);
     }
     let residual = |x: DVec3| {
@@ -210,46 +219,30 @@ pub(super) fn project_onto(surfs: &[&Surface], p0: DVec3, max_step: f64) -> (DVe
         if f.iter().all(|v| v.abs() < 1e-11 * (1.0 + x.length())) {
             break;
         }
-        let g: Vec<DVec3> = surfs.iter().map(|s| s.gradient(x)).collect();
-        let step = if k <= 3 {
-            // Minimum-norm step: delta = -J^T (J J^T + mu I)^-1 f.
-            let mut jjt = vec![vec![0.0f64; k]; k];
-            for a in 0..k {
-                for b in 0..k {
-                    jjt[a][b] = g[a].dot(g[b]);
+        let mut jtj = [[0.0f64; 3]; 3];
+        let mut jtf = DVec3::ZERO;
+        for (s, &fa) in surfs.iter().zip(&f) {
+            let ga = s.gradient(x);
+            let a = ga.to_array();
+            for r in 0..3 {
+                for c in 0..3 {
+                    jtj[r][c] += a[r] * a[c];
                 }
             }
-            let tr: f64 = (0..k).map(|a| jjt[a][a]).sum();
-            for (a, row) in jjt.iter_mut().enumerate() {
-                row[a] += 1e-10 * tr.max(1e-30);
-            }
-            let rhs: Vec<f64> = f.iter().map(|v| -v).collect();
-            match solve_dense(jjt, rhs) {
-                Some(y) => (0..k).fold(DVec3::ZERO, |acc, a| acc + g[a] * y[a]),
-                None => break,
-            }
-        } else {
-            // Over-determined: least squares compromise between the surfaces.
-            let mut jtj = vec![vec![0.0f64; 3]; 3];
-            let mut rhs = vec![0.0f64; 3];
-            for a in 0..k {
-                let ga = g[a].to_array();
-                for r in 0..3 {
-                    rhs[r] -= ga[r] * f[a];
-                    for c in 0..3 {
-                        jtj[r][c] += ga[r] * ga[c];
-                    }
-                }
-            }
-            let tr = jtj[0][0] + jtj[1][1] + jtj[2][2];
-            for (r, row) in jtj.iter_mut().enumerate() {
-                row[r] += 1e-10 * tr.max(1e-30);
-            }
-            match solve_dense(jtj, rhs) {
-                Some(y) => DVec3::new(y[0], y[1], y[2]),
-                None => break,
-            }
-        };
+            jtf += ga * fa;
+        }
+        let eig = eigen_3x3(jtj);
+        let lmax = eig[2].0;
+        if lmax <= 0.0 {
+            break;
+        }
+        let step = eig.iter().filter(|(l, _)| *l > WEAK_DIRECTION * lmax).fold(
+            DVec3::ZERO,
+            |acc, (l, v)| {
+                let v = DVec3::from_array(*v);
+                acc - v * (v.dot(jtf) / l)
+            },
+        );
         let len = step.length();
         let step = if len > max_step && len > 0.0 {
             step * (max_step / len)
@@ -302,6 +295,35 @@ mod tests {
         );
         assert!(rms < 1e-6, "rms {rms}");
         assert!((params[0] - 3.0).abs() < 1e-6 && (params[1] + 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn corner_of_nearly_coplanar_normals_stays_at_the_mesh_corner() {
+        let plane = |origin: DVec3, normal: DVec3| Surface::Plane {
+            origin,
+            normal: normal.normalize(),
+        };
+        // A clean box corner is solved exactly.
+        let (x, y, z) = (
+            plane(DVec3::new(10.0, 0.0, 0.0), DVec3::X),
+            plane(DVec3::new(0.0, 5.0, 0.0), DVec3::Y),
+            plane(DVec3::new(0.0, 0.0, 3.0), DVec3::Z),
+        );
+        let (p, res) = project_onto(&[&x, &y, &z], DVec3::new(9.7, 5.2, 2.9), 5.0);
+        assert!((p - DVec3::new(10.0, 5.0, 3.0)).length() < 1e-9, "{p}");
+        assert!(res < 1e-9);
+        // A scan face split by a 5° crease (a, b) meeting a wall (c) that
+        // almost contains the crease line: the exact common point lies far
+        // away, the corner must stay next to the mesh with a small gap.
+        let tilt = 5f64.to_radians();
+        let a = plane(DVec3::ZERO, DVec3::Z);
+        let b = plane(DVec3::ZERO, DVec3::new(0.0, tilt.sin(), tilt.cos()));
+        let c = plane(DVec3::new(0.0, 0.02, 0.0), DVec3::new(0.002, 1.0, 0.0));
+        // The exact common point is (10, 0, 0).
+        let mesh_corner = DVec3::new(0.05, 0.03, 0.02);
+        let (p, res) = project_onto(&[&a, &b, &c], mesh_corner, 50.0);
+        assert!((p - mesh_corner).length() < 0.2, "moved to {p}");
+        assert!(res < 0.05, "gap {res}");
     }
 
     #[test]

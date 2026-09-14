@@ -468,8 +468,8 @@ pub fn reconstruct_solid(
     }
     if vertex_gap > tol {
         report.notes.push(format!(
-            "Some corners join more than three surfaces that do not meet exactly (gap up to \
-             {vertex_gap:.3} mm)."
+            "Some corners join surfaces that do not meet exactly: more than three, or nearly \
+             tangent ones such as a face split by a shallow crease (gap up to {vertex_gap:.3} mm)."
         ));
     }
     if edge_mesh_dev > 3.0 * tol {

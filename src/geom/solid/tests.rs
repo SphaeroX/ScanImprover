@@ -469,6 +469,53 @@ fn dump_step_files() {
     }
 }
 
+/// Orients every triangle consistently with its neighbours by walking shared
+/// edges. Test helper for filled scans: `unify_normals` keys triangles by
+/// directed edge, so it loses one of two triangles that run an edge the same
+/// way and leaves that seam flipped.
+fn orient_consistently(mesh: &Mesh) -> Mesh {
+    let nt = mesh.triangle_count();
+    let tri = |idx: &[u32], t: usize| [idx[3 * t], idx[3 * t + 1], idx[3 * t + 2]];
+    let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for t in 0..nt {
+        let v = tri(&mesh.indices, t);
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            by_edge.entry((a.min(b), a.max(b))).or_default().push(t);
+        }
+    }
+    let mut idx = mesh.indices.clone();
+    let mut seen = vec![false; nt];
+    for s in 0..nt {
+        if seen[s] {
+            continue;
+        }
+        seen[s] = true;
+        let mut stack = vec![s];
+        while let Some(t) = stack.pop() {
+            let v = tri(&idx, t);
+            for k in 0..3 {
+                let (a, b) = (v[k], v[(k + 1) % 3]);
+                for &n in &by_edge[&(a.min(b), a.max(b))] {
+                    if seen[n] {
+                        continue;
+                    }
+                    seen[n] = true;
+                    // A consistent neighbour runs the shared edge as b -> a.
+                    let w = tri(&idx, n);
+                    if (0..3).any(|j| w[j] == a && w[(j + 1) % 3] == b) {
+                        idx.swap(3 * n + 1, 3 * n + 2);
+                    }
+                    stack.push(n);
+                }
+            }
+        }
+    }
+    let mut out = Mesh::from_indexed(mesh.positions.clone(), idx);
+    out.recompute_normals();
+    out
+}
+
 /// Reconstructs the mesh file `$SCANIMPROVER_SOLID_MESH` with the default
 /// settings and prints the report or the refusal; writes the STEP file into
 /// `$SCANIMPROVER_STEP_DIR` when set:
@@ -481,7 +528,38 @@ fn reconstruct_mesh_file() {
     };
     let path = std::path::PathBuf::from(path);
     let bytes = std::fs::read(&path).unwrap();
-    let mesh = crate::io::load_any(&path, &bytes).unwrap();
+    let mut mesh = crate::io::load_any(&path, &bytes).unwrap();
+    // `SCANIMPROVER_SOLID_REPAIR=1`: auto repair and fill all holes first, as
+    // a user would in Mesh repair before reconstructing a raw scan.
+    if std::env::var("SCANIMPROVER_SOLID_REPAIR").is_ok() {
+        mesh = crate::geom::repair::auto_repair_mesh(&mesh).0;
+        use crate::geom::hole_fill::{HoleFillConfig, HoleFillMethod};
+        let config = match std::env::var("SCANIMPROVER_FILL").as_deref() {
+            Ok("minimal") => HoleFillConfig {
+                method: HoleFillMethod::MinimalArea,
+                ..Default::default()
+            },
+            _ => HoleFillConfig::default(),
+        };
+        for pass in 0..5 {
+            let holes = crate::geom::hole_detect::detect_holes(&mesh);
+            if holes.is_empty() {
+                break;
+            }
+            println!("repair pass {pass}: {} holes", holes.len());
+            mesh = crate::geom::hole_fill::fill_holes(&mesh, &holes, config).unwrap();
+            mesh = crate::geom::repair::auto_repair_mesh(&mesh).0;
+        }
+        mesh = orient_consistently(&mesh);
+        let report = crate::geom::repair::analyze_mesh(&mesh);
+        println!(
+            "after repair: watertight {}, non-manifold edges {}, shells {}, flipped edges {}",
+            report.is_watertight,
+            report.non_manifold_edges,
+            report.component_count,
+            report.inconsistent_normals
+        );
+    }
     let t = std::time::Instant::now();
     let (groups, ids) = groups_of(&mesh);
     let result = reconstruct_solid(&mesh, &groups, &ids, &SolidParams::default());
