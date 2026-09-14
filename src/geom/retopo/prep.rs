@@ -7,12 +7,16 @@ use crate::decimate;
 use crate::mesh::Mesh;
 use glam::Vec3;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 /// Work mesh edge length relative to the lattice scale: a few vertices per
 /// lattice cell so every lattice point is claimed by at least one vertex.
 const WORK_EDGE_FRACTION: f32 = 1.0 / 3.5;
 /// Longest work mesh edge relative to the lattice scale.
 const MAX_EDGE_FRACTION: f32 = 0.5;
+/// A triangle whose middle vertex lies closer than this (relative to its
+/// longest edge) to that edge is degenerate.
+const COLLINEAR_EPS: f32 = 1e-4;
 /// Feature chains shorter than this (relative to the scale) are noise.
 const MIN_FEATURE_LENGTH: f32 = 1.0;
 /// A feature turning by less than this angle along its chain is straight.
@@ -46,7 +50,7 @@ pub(super) fn work_mesh(input: &Mesh, area: f32, scale: f32) -> Mesh {
     } else {
         input.clone()
     };
-    let work = drop_degenerate(&work, scale);
+    let work = drop_degenerate(&repair_degenerate(&work, scale), scale);
     split_long_edges(&work, scale * MAX_EDGE_FRACTION)
 }
 
@@ -77,6 +81,87 @@ fn drop_degenerate(mesh: &Mesh, scale: f32) -> Mesh {
         }
     }
     Mesh::from_indexed(positions, indices)
+}
+
+/// Removes degenerate (collinear) triangles without opening the surface.
+///
+/// CAD exports fan faces into slivers whose vertices lie on one line.
+/// Dropping them leaves slits inside the faces, which the feature detection
+/// takes for open boundaries and turns into hard constraints across the
+/// face. Instead, each degenerate triangle is deleted and the triangle
+/// across its longest edge is split at the middle vertex, so its two short
+/// edges pair with the split. Triangles with repeated vertices are dropped.
+fn repair_degenerate(mesh: &Mesh, scale: f32) -> Mesh {
+    let p = |i: u32| Vec3::from(mesh.positions[i as usize]);
+    let tiny = 1e-9 * scale;
+    // (a, b, c) with the longest edge a -> b and c its middle vertex, when
+    // the triangle is degenerate.
+    let collinear = |v: [u32; 3]| -> Option<(u32, u32, u32)> {
+        let k = (0..3).max_by(|&i, &j| {
+            let li = p(v[i]).distance_squared(p(v[(i + 1) % 3]));
+            let lj = p(v[j]).distance_squared(p(v[(j + 1) % 3]));
+            li.total_cmp(&lj)
+        })?;
+        let (a, b, c) = (v[k], v[(k + 1) % 3], v[(k + 2) % 3]);
+        let len = p(a).distance(p(b));
+        let height = (p(b) - p(a)).cross(p(c) - p(a)).length() / len.max(tiny);
+        (height <= COLLINEAR_EPS * len.max(tiny)).then_some((a, b, c))
+    };
+    let mut tris: Vec<[u32; 3]> = mesh
+        .indices
+        .chunks_exact(3)
+        .map(|t| [t[0], t[1], t[2]])
+        .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        .collect();
+    for _ in 0..64 {
+        let mut edge_tri: HashMap<(u32, u32), usize> = HashMap::with_capacity(tris.len() * 3);
+        for (t, v) in tris.iter().enumerate() {
+            for k in 0..3 {
+                edge_tri.insert((v[k], v[(k + 1) % 3]), t);
+            }
+        }
+        let mut touched = vec![false; tris.len()];
+        let mut added: Vec<[u32; 3]> = Vec::new();
+        let mut changed = false;
+        for t in 0..tris.len() {
+            if touched[t] {
+                continue;
+            }
+            let Some((a, b, c)) = collinear(tris[t]) else {
+                continue;
+            };
+            match edge_tri.get(&(b, a)) {
+                Some(&s) if s != t && !touched[s] => {
+                    let sv = tris[s];
+                    let Some(k) = (0..3).find(|&i| sv[i] == b && sv[(i + 1) % 3] == a) else {
+                        continue;
+                    };
+                    let x = sv[(k + 2) % 3];
+                    if x != c {
+                        added.push([b, c, x]);
+                        added.push([c, a, x]);
+                    }
+                    touched[s] = true;
+                }
+                // Open boundary: the outline stays the same without it.
+                None => {}
+                _ => continue,
+            }
+            touched[t] = true;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+        tris = tris
+            .into_iter()
+            .zip(touched)
+            .filter(|(_, gone)| !gone)
+            .map(|(v, _)| v)
+            .chain(added)
+            .collect();
+    }
+    Mesh::from_indexed(mesh.positions.clone(), tris.concat())
 }
 
 /// Splits every edge longer than `max_len` at its midpoint (conforming

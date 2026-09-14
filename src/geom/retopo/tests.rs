@@ -205,6 +205,111 @@ fn capped_cylinder(radius: f32, height: f32, sectors: usize, rings: usize) -> Me
     Mesh::from_corners(&corners)
 }
 
+/// Box `[0, dim]` whose faces are fans from their centre to `n` points per
+/// edge: long slivers like a CAD export (`n = 25` gives 302 vertices and 600
+/// triangles, the size of the part in the report).
+fn fan_box(dim: Vec3, n: usize) -> Mesh {
+    let coord = |axis: usize, k: usize| dim[axis] * k as f32 / n as f32;
+    let mut c: Vec<[f32; 3]> = Vec::new();
+    for a in 0..3 {
+        let (ua, va) = ((a + 1) % 3, (a + 2) % 3);
+        for far in [false, true] {
+            let level = if far { dim[a] } else { 0.0 };
+            let point = |i: usize, j: usize| {
+                let mut p = [0.0f32; 3];
+                p[a] = level;
+                p[ua] = coord(ua, i);
+                p[va] = coord(va, j);
+                p
+            };
+            // Counter-clockwise in (ua, va), i.e. around +a.
+            let border: Vec<[f32; 3]> = (0..n)
+                .map(|i| point(i, 0))
+                .chain((0..n).map(|j| point(n, j)))
+                .chain((0..n).map(|i| point(n - i, n)))
+                .chain((0..n).map(|j| point(0, n - j)))
+                .collect();
+            let mut center = [0.0f32; 3];
+            center[a] = level;
+            center[ua] = dim[ua] * 0.5;
+            center[va] = dim[va] * 0.5;
+            for k in 0..border.len() {
+                let (p, q) = (border[k], border[(k + 1) % border.len()]);
+                if far {
+                    c.extend_from_slice(&[center, p, q]);
+                } else {
+                    c.extend_from_slice(&[center, q, p]);
+                }
+            }
+        }
+    }
+    Mesh::from_corners(&c)
+}
+
+/// Box `[0, dim]` whose faces are fans from a hub at the middle of one edge
+/// to `n` points per edge. `inset: None` puts the hub on the edge, so the
+/// triangles along that edge are exactly degenerate; `Some(d)` moves it `d`
+/// into the face, giving near-degenerate slivers (CAD exports have both).
+fn hub_box(dim: Vec3, n: usize, inset: Option<f32>) -> Mesh {
+    let coord = |axis: usize, k: usize| dim[axis] * k as f32 / n as f32;
+    let mut c: Vec<[f32; 3]> = Vec::new();
+    for a in 0..3 {
+        let (ua, va) = ((a + 1) % 3, (a + 2) % 3);
+        for far in [false, true] {
+            let level = if far { dim[a] } else { 0.0 };
+            let point = |i: usize, j: usize| {
+                let mut p = [0.0f32; 3];
+                p[a] = level;
+                p[ua] = coord(ua, i);
+                p[va] = coord(va, j);
+                p
+            };
+            let border: Vec<[f32; 3]> = (0..n)
+                .map(|i| point(i, 0))
+                .chain((0..n).map(|j| point(n, j)))
+                .chain((0..n).map(|i| point(n - i, n)))
+                .chain((0..n).map(|j| point(0, n - j)))
+                .collect();
+            let m = border.len();
+            let mut tri = |p: [f32; 3], q: [f32; 3], r: [f32; 3]| {
+                if far {
+                    c.extend_from_slice(&[p, q, r]);
+                } else {
+                    c.extend_from_slice(&[p, r, q]);
+                }
+            };
+            let h = n / 2;
+            match inset {
+                None => {
+                    for k in 1..m - 1 {
+                        tri(border[h], border[(h + k) % m], border[(h + k + 1) % m]);
+                    }
+                }
+                Some(d) => {
+                    let mut hub = border[h];
+                    hub[va] += d;
+                    for k in 0..m {
+                        tri(hub, border[k], border[(k + 1) % m]);
+                    }
+                }
+            }
+        }
+    }
+    Mesh::from_corners(&c)
+}
+
+/// Output triangles whose normal points against the input surface below them.
+fn flipped_faces(input: &Mesh, out: &Mesh) -> usize {
+    let bvh = Bvh::new(&input.positions, &input.indices);
+    (0..out.triangle_count())
+        .filter(|&t| {
+            let [a, b, c] = out.triangle(t);
+            let (_, tri, d) = bvh.closest_point((a + b + c) / 3.0);
+            d.is_finite() && (b - a).cross(c - a).dot(input.face_normal(tri as usize)) < 0.0
+        })
+        .count()
+}
+
 // ---------------------------------------------------------------------------
 // Quality measures
 // ---------------------------------------------------------------------------
@@ -404,6 +509,35 @@ fn box_keeps_its_sharp_edges() {
     // Edge flow is aligned with the box axes.
     let aligned = edge_alignment(&out.mesh, |_| [Vec3::X, Vec3::Y, Vec3::Z]);
     assert!(aligned > 0.9, "{aligned}");
+}
+
+#[test]
+fn cad_fan_with_degenerate_slivers_gives_a_closed_mesh() {
+    // A CAD export fanning every face from a vertex on one of its edges:
+    // the triangles along that edge are exactly degenerate. Dropping them
+    // left slits inside the faces that became hard feature lines, and the
+    // result had holes, inside-out faces and a rounded outline.
+    let b = hub_box(Vec3::new(50.0, 30.0, 25.0), 25, None);
+    let (out, q) = run(&b, params(500));
+    assert!(q.manifold && q.closed, "{q:?}");
+    let h = out.stats.edge_length;
+    assert!(q.max_in_to_out < 0.3 * h, "outline kept: {q:?}");
+    let flipped = flipped_faces(&b, &out.mesh);
+    assert!(flipped <= 2, "{flipped} flipped triangles");
+}
+
+#[test]
+fn cad_fans_with_long_slivers_give_a_closed_mesh_without_folds() {
+    for n in [25, 60] {
+        let b = fan_box(Vec3::new(50.0, 30.0, 25.0), n);
+        let (out, q) = run(&b, params(500));
+        assert!(q.manifold && q.closed, "n = {n}: {q:?}");
+        assert_eq!(flipped_faces(&b, &out.mesh), 0, "n = {n}");
+        assert!(
+            q.max_in_to_out < 0.3 * out.stats.edge_length,
+            "n = {n}: {q:?}"
+        );
+    }
 }
 
 #[test]

@@ -18,6 +18,11 @@ const MERGE_MAX_COS: f32 = 0.64;
 const RELAX_STEP: f32 = 0.5;
 /// Largest hole (in edges) closed after the extraction.
 const MAX_HOLE: usize = 16;
+/// Holes up to this many edges on the surface are closed whatever their
+/// winding.
+const SMALL_HOLE: usize = 6;
+/// Rounds of the untangling of folded faces.
+const UNTANGLE_ROUNDS: usize = 12;
 
 /// Largest |cos| of the corner angles of a polygon, or 2 when it is not
 /// convex around `n`.
@@ -143,6 +148,52 @@ pub(super) fn split_polygons(poly: &mut PolyMesh) {
     poly.faces = out;
 }
 
+/// Face point of a polygon for the subdivision: the centroid, or for a
+/// non-convex face (the centroid of an L-shaped face can lie outside it) the
+/// point between the centroid and a corner from which the sub-quads turn
+/// consistently, so none of them folds over.
+fn face_point(pos: &[Vec3], face: &[u32], centroid: Vec3) -> Vec3 {
+    let k = face.len();
+    let n = newell_normal(pos, face).normalize_or_zero();
+    if n == Vec3::ZERO {
+        return centroid;
+    }
+    let p = |i: usize| pos[face[i % k] as usize];
+    // Smallest turn of the sub-quads [v, mid next, c, mid prev] at their
+    // midpoints and at c (the corner at v is the face's own corner).
+    let score = |c: Vec3| {
+        let mut worst = f32::MAX;
+        for i in 0..k {
+            let q = [
+                p(i),
+                (p(i) + p(i + 1)) * 0.5,
+                c,
+                (p(i + k - 1) + p(i)) * 0.5,
+            ];
+            for j in 0..3 {
+                let (a, b, d) = (q[j], q[j + 1], q[(j + 2) % 4]);
+                worst = worst.min((b - a).cross(d - b).dot(n));
+            }
+        }
+        worst
+    };
+    let base = score(centroid);
+    if base > 0.0 {
+        return centroid;
+    }
+    let mut best = (base, centroid);
+    for i in 0..k {
+        for t in [0.25f32, 0.5, 0.75] {
+            let c = centroid.lerp(p(i), t);
+            let s = score(c);
+            if s > best.0 {
+                best = (s, c);
+            }
+        }
+    }
+    best.1
+}
+
 /// One linear subdivision step: every n-gon becomes n quads (face point,
 /// edge midpoints). Vertices are projected onto the surface afterwards.
 pub(super) fn subdivide(poly: &PolyMesh) -> PolyMesh {
@@ -165,7 +216,7 @@ pub(super) fn subdivide(poly: &PolyMesh) -> PolyMesh {
         let c = pos.len() as u32;
         let centroid = face.iter().map(|&v| poly.pos[v as usize]).sum::<Vec3>() / k as f32;
         let n = face.iter().map(|&v| poly.nrm[v as usize]).sum::<Vec3>();
-        pos.push(centroid);
+        pos.push(face_point(&poly.pos, face, centroid));
         nrm.push(n.normalize_or(Vec3::Y));
         feature.push(false);
         for i in 0..k {
@@ -252,8 +303,10 @@ fn relax(poly: &mut PolyMesh, iterations: u32, input: &Mesh, bvh: &Bvh) {
 
 /// Closes holes of up to [`MAX_HOLE`] edges left by the extraction. Loops
 /// that run clockwise (open boundaries) or do not cover surface (real
-/// holes of the scan) stay open.
-fn fill_small_holes(poly: &mut PolyMesh, s: f32, bvh: &Bvh) {
+/// holes of the scan) stay open. The winding is judged against the input
+/// surface under the hole as well as the extracted vertex normals, which
+/// can be unreliable next to sharp edges.
+fn fill_small_holes(poly: &mut PolyMesh, s: f32, input: &Mesh, bvh: &Bvh) {
     let mut darts: Vec<(u32, u32)> = poly
         .faces
         .iter()
@@ -313,16 +366,94 @@ fn fill_small_holes(poly: &mut PolyMesh, s: f32, bvh: &Bvh) {
                 .map(|&v| poly.nrm[v as usize])
                 .sum::<Vec3>()
                 .normalize_or_zero();
-            let facing = newell_normal(&poly.pos, &piece)
-                .normalize_or_zero()
-                .dot(avg_n);
+            let loop_n = newell_normal(&poly.pos, &piece).normalize_or_zero();
+            let facing = loop_n.dot(avg_n);
             let c = piece.iter().map(|&v| poly.pos[v as usize]).sum::<Vec3>() / piece.len() as f32;
-            if facing > -0.5 && bvh.closest_distance(c) < 0.4 * s {
+            let (_, tri, dist) = bvh.closest_point(c);
+            let surface_facing = if dist.is_finite() {
+                loop_n.dot(input.face_normal(tri as usize).normalize_or_zero())
+            } else {
+                0.0
+            };
+            // A loop of a few edges lying on the surface is a gap left where
+            // the extracted faces fold next to a sharp edge: closing it keeps
+            // the mesh closed, the untangling unfolds it. Longer loops must
+            // wind with the surface (open boundaries of the input stay open).
+            let small = piece.len() <= SMALL_HOLE;
+            if (small || facing > -0.5 || surface_facing > 0.5) && dist < 0.4 * s {
                 filled.push(piece);
             }
         }
     }
     poly.faces.extend(filled);
+}
+
+/// Faces whose normal points against the input surface below them.
+fn folded_faces(poly: &PolyMesh, input: &Mesh, bvh: &Bvh) -> Vec<usize> {
+    (0..poly.faces.len())
+        .into_par_iter()
+        .filter(|&f| {
+            let face = &poly.faces[f];
+            let n = newell_normal(&poly.pos, face);
+            let c = face.iter().map(|&v| poly.pos[v as usize]).sum::<Vec3>() / face.len() as f32;
+            let (_, tri, d) = bvh.closest_point(c);
+            d.is_finite() && n.dot(input.face_normal(tri as usize)) < 0.0
+        })
+        .collect()
+}
+
+/// Unfolds faces that point against the input surface (next to sharp edges
+/// after the subdivision or the relaxation): their free corners move to the
+/// average of their neighbours, projected onto the input, until no face is
+/// folded or the rounds run out. Feature and boundary vertices stay.
+fn untangle(poly: &mut PolyMesh, input: &Mesh, bvh: &Bvh) {
+    let nv = poly.pos.len();
+    let mut nbrs: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    let mut boundary = vec![false; nv];
+    let edges = face_edges(&poly.faces);
+    let mut s = 0;
+    while s < edges.len() {
+        let mut e = s + 1;
+        while e < edges.len() && edges[e].0 == edges[s].0 {
+            e += 1;
+        }
+        let (a, b) = ((edges[s].0 >> 32) as u32, (edges[s].0 & 0xffff_ffff) as u32);
+        nbrs[a as usize].push(b);
+        nbrs[b as usize].push(a);
+        if e - s == 1 {
+            boundary[a as usize] = true;
+            boundary[b as usize] = true;
+        }
+        s = e;
+    }
+    for _ in 0..UNTANGLE_ROUNDS {
+        let folded = folded_faces(poly, input, bvh);
+        let mut movable: Vec<u32> = folded
+            .iter()
+            .flat_map(|&f| poly.faces[f].iter().copied())
+            .filter(|&v| !poly.feature[v as usize] && !boundary[v as usize])
+            .collect();
+        movable.sort_unstable();
+        movable.dedup();
+        if movable.is_empty() {
+            break;
+        }
+        let pos = &poly.pos;
+        let nrm = &poly.nrm;
+        let moves: Vec<(Vec3, Vec3)> = movable
+            .par_iter()
+            .map(|&v| {
+                let nb = &nbrs[v as usize];
+                let avg =
+                    nb.iter().map(|&u| pos[u as usize]).sum::<Vec3>() / nb.len().max(1) as f32;
+                project(avg, nrm[v as usize], input, bvh)
+            })
+            .collect();
+        for (&v, (p, n)) in movable.iter().zip(moves) {
+            poly.pos[v as usize] = p;
+            poly.nrm[v as usize] = n;
+        }
+    }
 }
 
 /// Turns the extracted polygons (lattice scale `s`) into the final
@@ -334,7 +465,7 @@ pub(super) fn finish(
     input: &Mesh,
     bvh: &Bvh,
 ) -> PolyMesh {
-    fill_small_holes(&mut poly, s, bvh);
+    fill_small_holes(&mut poly, s, input, bvh);
     merge_triangle_pairs(&mut poly);
     if params.pure_quads {
         poly = subdivide(&poly);
@@ -352,6 +483,7 @@ pub(super) fn finish(
         poly.nrm[v] = n;
     }
     relax(&mut poly, params.relax_iterations, input, bvh);
+    untangle(&mut poly, input, bvh);
     poly
 }
 
