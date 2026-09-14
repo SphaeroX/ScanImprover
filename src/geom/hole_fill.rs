@@ -286,7 +286,7 @@ fn fill_ear_clipping(mesh: &Mesh, hole: &HoleLoop, _base_nv: u32) -> Result<Mesh
     })
 }
 
-fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
+pub(crate) fn ear_clip_polygon(poly: &[glam::Vec2]) -> Result<Vec<[usize; 3]>, String> {
     let n = poly.len();
     if n < 3 {
         return Err("Cannot triangulate polygon with < 3 vertices".to_string());
@@ -425,16 +425,9 @@ fn fill_minimal_area(mesh: &Mesh, hole: &HoleLoop, _base_nv: u32) -> Result<Mesh
     let mut preview_indices = Vec::with_capacity(tri_indices_local.len() * 3);
 
     for [i0, i1, i2] in tri_indices_local {
-        let p0 = pts[i0];
-        let p1 = pts[i1];
-        let p2 = pts[i2];
-        let tri_n = (p1 - p0).cross(p2 - p0);
-
-        let (v0, v1, v2) = if tri_n.dot(hole.normal) < 0.0 {
-            (i0, i2, i1)
-        } else {
-            (i0, i1, i2)
-        };
+        // `i0 < i1 < i2` follow the loop, which runs along the winding of
+        // the surrounding triangles: the patch needs the opposite winding.
+        let (v0, v1, v2) = (i0, i2, i1);
 
         new_indices.push(hole.vertices[v0]);
         new_indices.push(hole.vertices[v1]);
@@ -660,7 +653,7 @@ fn min_angle(a: Vec3, b: Vec3, c: Vec3) -> f32 {
 /// sorted angle vector strictly increases with every flip.
 type EdgeUsers = std::collections::HashMap<(usize, usize), Vec<(usize, usize)>>;
 
-fn improve_triangulation(tris: &mut [[usize; 3]], pos: &[Vec3], n_boundary: usize) {
+pub(crate) fn improve_triangulation(tris: &mut [[usize; 3]], pos: &[Vec3], n_boundary: usize) {
     const MAX_PASSES: usize = 12;
     let is_loop_edge = |a: usize, b: usize| {
         a < n_boundary && b < n_boundary && ((a + 1) % n_boundary == b || (b + 1) % n_boundary == a)
@@ -791,5 +784,31 @@ mod tests {
         // Every triangle still contains the interior vertex: the boundary
         // edges (0,1), (1,2), (2,0) were not flipped away.
         assert!(tris.iter().all(|t| t.contains(&3)));
+    }
+
+    #[test]
+    fn patches_are_wound_like_the_surrounding_surface() {
+        use crate::geom::guided_fill::fixtures::{cut_hole, lattice_box};
+        use crate::geom::hole_detect::detect_holes;
+        use crate::geom::repair::analyze_mesh;
+
+        // Small (minimal area) and large (ear clipping) holes in a closed box.
+        for radius in [1.2, 3.2] {
+            let open = cut_hole(&lattice_box(8), Vec3::new(4.0, 4.0, 8.0), radius);
+            let holes = detect_holes(&open);
+            assert_eq!(holes.len(), 1);
+            for method in HoleFillMethod::all() {
+                let config = HoleFillConfig {
+                    method,
+                    ..Default::default()
+                };
+                let patch = generate_hole_patch(&open, &holes[0], config).unwrap();
+                let mut filled = open.clone();
+                apply_patch(&mut filled, &patch);
+                let health = analyze_mesh(&filled);
+                assert!(health.is_watertight, "{method:?}");
+                assert_eq!(health.inconsistent_normals, 0, "{method:?} r={radius}");
+            }
+        }
     }
 }

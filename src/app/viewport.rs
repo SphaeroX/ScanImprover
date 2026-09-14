@@ -590,6 +590,23 @@ impl App {
                 [0.20, 1.0, 0.75, 0.95],
             );
         }
+        // Guided hole fill preview with its rebuilt edges highlighted.
+        if self.is_section_open(ToolSection::Experimental)
+            && let Some(Ok(res)) = self.guided_preview_result()
+        {
+            push_patch(
+                &res.patch,
+                &mut fills,
+                &mut overlay_lines,
+                [0.95, 0.40, 0.85, 0.35],
+                [1.0, 0.50, 0.90, 0.9],
+            );
+            for line in &res.creases {
+                for w in line.windows(2) {
+                    push_line(&mut overlay_lines, w[0], w[1], [1.0, 0.92, 0.2, 1.0]);
+                }
+            }
+        }
 
         // Brush hover: footprint disc plus the faces the dab would change.
         if let (Some(hit), false) = (&self.hover_hit, is_navigating)

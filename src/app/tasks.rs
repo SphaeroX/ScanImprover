@@ -36,7 +36,7 @@ impl App {
     }
 
     /// True when the displayed mesh is large enough to justify a worker job.
-    fn prefers_async(&self) -> bool {
+    pub(crate) fn prefers_async(&self) -> bool {
         self.display_tri_count() >= self.async_min_tris
     }
 
@@ -332,6 +332,19 @@ impl App {
                 if self.solve_job == Some(id) {
                     self.solve_job = None;
                     self.apply_hole_solve_result(result);
+                }
+            }
+            TaskOutput::GuidedFill { batch } => {
+                if let Some((jid, generation)) = self.edit_job
+                    && jid == id
+                {
+                    self.edit_job = None;
+                    if generation == self.mesh_generation {
+                        self.finish_guided_batch(*batch);
+                    } else {
+                        self.status = "Operation discarded: the mesh changed while it was running."
+                            .to_string();
+                    }
                 }
             }
             TaskOutput::Exported { result } => {
