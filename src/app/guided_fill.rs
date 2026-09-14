@@ -7,7 +7,7 @@
 
 use super::App;
 use crate::geom::guided_fill::{
-    GuidedBatch, GuidedFillConfig, GuidedFillResult, fill_holes_guided, guided_hole_patch,
+    Guide, GuidedBatch, GuidedFillConfig, GuidedFillResult, fill_holes_guided, guided_hole_patch,
     record_patch_groups,
 };
 use crate::geom::hole_fill::apply_patch;
@@ -21,6 +21,7 @@ pub(crate) struct GuidedPreview {
     groups_generation: u64,
     hole: Vec<u32>,
     config: GuidedFillConfig,
+    guides: Vec<Guide>,
     result: Result<GuidedFillResult, String>,
 }
 
@@ -33,6 +34,16 @@ impl App {
             fit_tol: self.group_fit_tol,
             fallback: self.repair_config,
         }
+    }
+
+    /// Cylinders of the visible fitted circles, guiding the fill along round
+    /// profiles the face groups miss.
+    pub(crate) fn guided_fill_guides(&self) -> Vec<Guide> {
+        self.circles
+            .iter()
+            .filter(|c| c.visible)
+            .filter_map(Guide::from_circle)
+            .collect()
     }
 
     /// True when face groups exist for the displayed mesh.
@@ -67,20 +78,30 @@ impl App {
             return;
         };
         let config = self.guided_fill_config();
+        let guides = self.guided_fill_guides();
         if let Some(p) = &self.guided_preview
             && p.mesh_generation == self.mesh_generation
             && p.groups_generation == self.groups_generation
             && p.hole == hole.vertices
             && p.config == config
+            && p.guides == guides
         {
             return;
         }
-        let result = guided_hole_patch(&mesh, &hole, &self.face_groups, &self.group_ids, config);
+        let result = guided_hole_patch(
+            &mesh,
+            &hole,
+            &self.face_groups,
+            &self.group_ids,
+            &guides,
+            config,
+        );
         self.guided_preview = Some(GuidedPreview {
             mesh_generation: self.mesh_generation,
             groups_generation: self.groups_generation,
             hole: hole.vertices,
             config,
+            guides,
             result,
         });
     }
@@ -107,7 +128,15 @@ impl App {
         }
         let groups_valid = self.face_groups_valid();
         let config = self.guided_fill_config();
-        match guided_hole_patch(&curr, &hole, &self.face_groups, &self.group_ids, config) {
+        let guides = self.guided_fill_guides();
+        match guided_hole_patch(
+            &curr,
+            &hole,
+            &self.face_groups,
+            &self.group_ids,
+            &guides,
+            config,
+        ) {
             Ok(result) => {
                 let mut mesh = (*curr).clone();
                 let first = mesh.triangle_count();
@@ -158,15 +187,16 @@ impl App {
             (Vec::new(), Vec::new())
         };
         let config = self.guided_fill_config();
+        let guides = self.guided_fill_guides();
         if !self.prefers_async() {
-            let batch = fill_holes_guided(&curr, &holes, &groups, &ids, config, |_, _| {});
+            let batch = fill_holes_guided(&curr, &holes, &groups, &ids, &guides, config, |_, _| {});
             self.finish_guided_batch(batch);
             return;
         }
         self.status = "Guided hole fill…".to_string();
         let generation = self.mesh_generation;
         let id = self.worker.submit_task("Guided hole fill", move |p| {
-            let batch = fill_holes_guided(&curr, &holes, &groups, &ids, config, |i, n| {
+            let batch = fill_holes_guided(&curr, &holes, &groups, &ids, &guides, config, |i, n| {
                 p.set(
                     Some(i as f32 / n.max(1) as f32),
                     &format!("hole {} of {}", i + 1, n),

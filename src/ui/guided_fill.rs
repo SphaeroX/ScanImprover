@@ -26,8 +26,9 @@ pub fn render_guided_fill(app: &mut App, ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(
             "Extends the planes, cylinders and spheres of the face groups around a hole \
-             into the gap and rebuilds the sharp edges where they meet. Freeform parts use \
-             the standard fill of Mesh repair.",
+             into the gap and rebuilds the sharp edges where they meet. Visible fitted \
+             circles act as cylinders along round profiles the groups miss. Freeform parts \
+             use the standard fill of Mesh repair.",
         )
         .size(11.0)
         .color(theme::pal().text_muted),
@@ -117,11 +118,29 @@ pub fn render_guided_fill(app: &mut App, ui: &mut egui::Ui) {
         );
     } else {
         ui.label(
-            egui::RichText::new("No face groups yet: holes get the standard fill.")
-                .size(11.0)
-                .color(theme::pal().warn),
+            egui::RichText::new(
+                "No face groups yet: holes get the standard fill unless a fitted circle \
+                 matches them.",
+            )
+            .size(11.0)
+            .color(theme::pal().warn),
         );
     }
+    let circles = app.circles.iter().filter(|c| c.visible).count();
+    let circles_text = if circles == 0 {
+        "Tip: fit a circle to a round profile (Face selection) to rebuild it as a cylinder."
+            .to_string()
+    } else {
+        format!(
+            "{circles} fitted circle{} guide the fill as cylinders.",
+            if circles == 1 { "" } else { "s" }
+        )
+    };
+    ui.label(
+        egui::RichText::new(circles_text)
+            .size(11.0)
+            .color(theme::pal().text_muted),
+    );
     if run_detect {
         app.request_face_groups();
     }

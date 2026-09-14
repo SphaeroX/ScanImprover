@@ -8,8 +8,10 @@
 //! 1. **Rim labels.** Every rim edge gets the group of the triangle owning
 //!    it. A group without a primitive, or whose primitive misses the rim by
 //!    more than the fit tolerance even after a local refit, counts as
-//!    freeform. Runs of one or two edges (label noise along a crease) are
-//!    merged into their neighbours.
+//!    freeform. Visible fitted circles act as cylinders ([`Guide`]) and take
+//!    over the rim edges they match better than the groups, e.g. a round
+//!    profile of a scan whose groups are ragged. Runs of one or two edges
+//!    (label noise along a crease) are merged into their neighbours.
 //! 2. **Creases.** Where the label changes along the rim an edge enters the
 //!    hole. The two transitions between the same pair of groups are joined by
 //!    the intersection curve of their primitives (plane/plane line,
@@ -29,7 +31,7 @@
 //!    over the rim. Anything the reconstruction cannot handle falls back to
 //!    the standard fill ([`generate_hole_patch`]).
 
-use crate::geom::fitting::{fit_circle_2d, fit_plane, plane_basis, solve_3x3};
+use crate::geom::fitting::{FittedCircle, fit_circle_2d, fit_plane, plane_basis, solve_3x3};
 use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_fill::{
     HoleFillConfig, MeshPatch, apply_patch, ear_clip_polygon, generate_hole_patch,
@@ -169,6 +171,32 @@ impl Surface {
     }
 }
 
+/// A reference surface fitted by the user, used for the rim edges it matches
+/// better than the face groups: the cylinder of a fitted circle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Guide {
+    pub name: String,
+    pub surface: Surface,
+    /// Distance from the surface still counted as on it (noise of the fit).
+    pub tol: f32,
+}
+
+impl Guide {
+    /// The cylinder through a fitted circle, its axis along the circle normal.
+    pub fn from_circle(circle: &FittedCircle) -> Option<Guide> {
+        let f = &circle.fit;
+        (f.radius > 0.0 && f.normal.length_squared() > 0.5).then(|| Guide {
+            name: circle.name.clone(),
+            surface: Surface::Cylinder {
+                point: f.center,
+                axis: f.normal.normalize(),
+                radius: f.radius,
+            },
+            tol: 3.0 * f.radial_rms,
+        })
+    }
+}
+
 /// Summary of a guided fill for the UI and the tests.
 #[derive(Clone, Debug, Default)]
 pub struct GuidedFillReport {
@@ -203,13 +231,15 @@ pub struct GuidedFillResult {
 }
 
 /// Fills `hole` guided by the face groups (`group_ids` = per-triangle group
-/// id map of `mesh`). Falls back to the standard fill when the hole cannot be
-/// rebuilt from primitives; errors only when that fails too.
+/// id map of `mesh`) and the fitted reference `guides`. Falls back to the
+/// standard fill when the hole cannot be rebuilt from primitives; errors
+/// only when that fails too.
 pub fn guided_hole_patch(
     mesh: &Mesh,
     hole: &HoleLoop,
     groups: &[FaceGroup],
     group_ids: &[i32],
+    guides: &[Guide],
     config: GuidedFillConfig,
 ) -> Result<GuidedFillResult, String> {
     if hole.vertices.len() < 3 {
@@ -222,7 +252,7 @@ pub fn guided_hole_patch(
     {
         return Err("The hole does not belong to this mesh.".to_string());
     }
-    match reconstruct(mesh, hole, groups, group_ids, config) {
+    match reconstruct(mesh, hole, groups, group_ids, guides, config) {
         Ok(result) => Ok(result),
         Err(reason) => {
             let patch = generate_hole_patch(mesh, hole, config.fallback)?;
@@ -263,6 +293,7 @@ pub fn fill_holes_guided(
     holes: &[HoleLoop],
     groups: &[FaceGroup],
     group_ids: &[i32],
+    guides: &[Guide],
     config: GuidedFillConfig,
     mut progress: impl FnMut(usize, usize),
 ) -> GuidedBatch {
@@ -278,7 +309,7 @@ pub fn fill_holes_guided(
     let (mut guided, mut fallback, mut failed) = (0, 0, 0);
     for (i, hole) in holes.iter().enumerate() {
         progress(i, holes.len());
-        match guided_hole_patch(&working, hole, &groups, &ids, config) {
+        match guided_hole_patch(&working, hole, &groups, &ids, guides, config) {
             Ok(result) => {
                 let first = working.triangle_count();
                 apply_patch(&mut working, &result.patch);
@@ -365,11 +396,13 @@ fn reconstruct(
     hole: &HoleLoop,
     groups: &[FaceGroup],
     group_ids: &[i32],
+    guides: &[Guide],
     config: GuidedFillConfig,
 ) -> Result<GuidedFillResult, String> {
     let n = hole.vertices.len();
     let nt = mesh.triangle_count();
-    if groups.is_empty() || group_ids.len() != nt {
+    let groups_ok = !groups.is_empty() && group_ids.len() == nt;
+    if !groups_ok && guides.is_empty() {
         return Err("no face groups for this mesh (run the detection first)".to_string());
     }
     let rim: Vec<Vec3> = hole
@@ -387,7 +420,7 @@ fn reconstruct(
     let (owners, chords) = rim_topology(mesh, hole);
     let raw: Vec<i32> = owners
         .iter()
-        .map(|o| o.map_or(-1, |t| group_ids[t]))
+        .map(|o| o.filter(|_| groups_ok).map_or(-1, |t| group_ids[t]))
         .collect();
     let mut gids: Vec<i32> = raw.iter().copied().filter(|&g| g >= 0).collect();
     gids.sort_unstable();
@@ -410,6 +443,34 @@ fn reconstruct(
         .iter()
         .map(|g| slot_of.get(g).copied().unwrap_or(FREE))
         .collect();
+    // Fitted circles (as cylinders) take over the rim edges they match better
+    // than the face groups: along a round profile of a scan the groups are
+    // often freeform or ragged.
+    let edge_dist = |s: &Surface, i: usize| s.distance(rim[i]).max(s.distance(rim[(i + 1) % n]));
+    let mut guide_slots: Vec<(i32, &str)> = Vec::new();
+    for guide in guides {
+        let tol = guide.tol.max(config.fit_tol * diag).max(1e-6 * diag);
+        let slot = surfs.len() as i32;
+        let mut replaced: HashMap<i32, usize> = HashMap::new();
+        for i in 0..n {
+            let d = edge_dist(&guide.surface, i);
+            if d <= tol && (lab[i] == FREE || edge_dist(&surfs[lab[i] as usize].0, i) > d) {
+                lab[i] = slot;
+                *replaced.entry(raw[i]).or_default() += 1;
+            }
+        }
+        if replaced.is_empty() {
+            continue;
+        }
+        // Patch triangles join the face group the guide replaced most.
+        let gid = replaced
+            .iter()
+            .filter(|(g, _)| **g >= 0)
+            .max_by_key(|(g, c)| (**c, -**g))
+            .map_or(-1, |(g, _)| *g);
+        surfs.push((guide.surface, gid));
+        guide_slots.push((slot, guide.name.as_str()));
+    }
     merge_short_runs(&mut lab, MIN_RUN_EDGES);
     let input = PatchInput {
         mesh,
@@ -429,7 +490,20 @@ fn reconstruct(
             break;
         }
         match build_patch(&input, &lab) {
-            Ok(result) => return Ok(result),
+            Ok(mut result) => {
+                let used: Vec<&str> = guide_slots
+                    .iter()
+                    .filter(|(slot, _)| lab.contains(slot))
+                    .map(|(_, name)| *name)
+                    .collect();
+                if !used.is_empty() {
+                    result
+                        .report
+                        .note
+                        .push_str(&format!(", guided by {}", used.join(", ")));
+                }
+                return Ok(result);
+            }
             Err(e) => {
                 first_err.get_or_insert(e);
             }
@@ -1770,7 +1844,7 @@ mod tests {
     fn guided_fill(mesh: &Mesh, p: Vec3) -> (GuidedFillResult, Mesh) {
         let (groups, ids) = segment(mesh);
         let hole = hole_near(mesh, p);
-        let res = guided_hole_patch(mesh, &hole, &groups, &ids, GuidedFillConfig::default())
+        let res = guided_hole_patch(mesh, &hole, &groups, &ids, &[], GuidedFillConfig::default())
             .expect("patch");
         let mut filled = mesh.clone();
         apply_patch(&mut filled, &res.patch);
@@ -1980,7 +2054,7 @@ mod tests {
         let standard = generate_hole_patch(&mesh, &hole, config.fallback).unwrap();
         let before = detect_holes(&mesh).len();
 
-        let res = guided_hole_patch(&mesh, &hole, &groups, &ids, config).unwrap();
+        let res = guided_hole_patch(&mesh, &hole, &groups, &ids, &[], config).unwrap();
         assert!(!res.report.guided);
         assert!(res.report.note.contains("no plane"), "{}", res.report.note);
         assert_eq!(res.patch.new_indices, standard.new_indices);
@@ -1990,7 +2064,7 @@ mod tests {
         assert_eq!(detect_holes(&filled).len(), before - 1);
 
         // Without face groups the fill falls back as well.
-        let res = guided_hole_patch(&mesh, &hole, &[], &[], config).unwrap();
+        let res = guided_hole_patch(&mesh, &hole, &[], &[], &[], config).unwrap();
         assert!(!res.report.guided);
         assert!(
             res.report.note.contains("face groups"),
@@ -1998,6 +2072,58 @@ mod tests {
             res.report.note
         );
         assert_eq!(res.patch.new_indices, standard.new_indices);
+    }
+
+    #[test]
+    fn fitted_circle_rebuilds_a_round_profile_the_face_groups_miss() {
+        let (r, at) = (4.0, Vec3::new(4.0, 0.0, 0.0));
+        let mesh = cut_hole(&boss_on_plate(r, 12.0, 6.0, 64), at, 1.5);
+        let (mut groups, ids) = segment(&mesh);
+        // A ragged scan: the boss wall is not recognized as a cylinder.
+        for g in &mut groups {
+            if g.kind == GroupKind::Cylinder {
+                g.kind = GroupKind::Freeform;
+            }
+        }
+        let hole = hole_near(&mesh, at);
+        let config = GuidedFillConfig::default();
+        let res = guided_hole_patch(&mesh, &hole, &groups, &ids, &[], config).unwrap();
+        assert!(!res.report.surfaces.contains(&GroupKind::Cylinder));
+
+        let wall = Surface::Cylinder {
+            point: Vec3::new(0.0, 0.0, 2.0),
+            axis: Vec3::Z,
+            radius: r,
+        };
+        let guide = Guide {
+            name: "Circle 1".to_string(),
+            surface: wall,
+            tol: 0.0,
+        };
+        let guides = std::slice::from_ref(&guide);
+        let res = guided_hole_patch(&mesh, &hole, &groups, &ids, guides, config).unwrap();
+        assert!(res.report.guided, "{}", res.report.note);
+        let mut kinds = res.report.surfaces.clone();
+        kinds.sort_by_key(|k| *k as u8);
+        assert_eq!(kinds, vec![GroupKind::Plane, GroupKind::Cylinder]);
+        assert_eq!(res.report.creases, 1);
+        assert!(res.report.note.contains("Circle 1"), "{}", res.report.note);
+        assert_on_surfaces(&res, &[plane([0.0, 0.0, 0.0], Vec3::Z), wall], 1e-3);
+        let mut filled = mesh.clone();
+        apply_patch(&mut filled, &res.patch);
+        let health = analyze_mesh(&filled);
+        assert_eq!(health.non_manifold_edges, 0);
+        assert_eq!(health.inconsistent_normals, 0);
+        assert_eq!(detect_holes(&filled).len(), detect_holes(&mesh).len() - 1);
+
+        // Without any face groups a fitted circle alone rebuilds a wall hole.
+        let at = Vec3::new(4.0, 0.0, 3.0);
+        let mesh = cut_hole(&boss_on_plate(r, 12.0, 6.0, 64), at, 1.2);
+        let hole = hole_near(&mesh, at);
+        let res = guided_hole_patch(&mesh, &hole, &[], &[], guides, config).unwrap();
+        assert!(res.report.guided, "{}", res.report.note);
+        assert_eq!(res.report.surfaces, vec![GroupKind::Cylinder]);
+        assert_on_surfaces(&res, &[wall], 1e-3);
     }
 
     #[test]
@@ -2013,6 +2139,7 @@ mod tests {
             &holes,
             &groups,
             &ids,
+            &[],
             GuidedFillConfig::default(),
             |_, _| calls += 1,
         );
