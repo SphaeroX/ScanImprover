@@ -474,3 +474,37 @@ fn grow_session_undo_restores_initial_selection() {
     assert!(app.sel_grow_history.is_empty());
 }
 
+#[test]
+fn vertex_colors_selection_has_hard_edges_without_gradient() {
+    let flat = Mesh::from_indexed(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        vec![0, 1, 2, 1, 3, 2],
+    );
+    let mut app = app_with(flat.clone());
+    // Select triangle 0, leave triangle 1 unselected.
+    select(&mut app, &[0]);
+
+    let split = crate::render::CreaseSplit::build_per_face(&flat, crate::render::CREASE_COS);
+    let colors = app.vertex_colors(&split.render_to_mesh, &split.render_to_face);
+
+    assert_eq!(colors.len(), 6);
+    // Triangle 0 (corners 0, 1, 2) is selected.
+    // Triangle 1 (corners 3, 4, 5) is unselected.
+    // Corners 0, 1, 2 must all have identical selected tint.
+    assert_eq!(colors[0], colors[1]);
+    assert_eq!(colors[1], colors[2]);
+
+    // Corners 3, 4, 5 must all have identical unselected base color.
+    assert_eq!(colors[3], colors[4]);
+    assert_eq!(colors[4], colors[5]);
+
+    // The selected color must differ from the unselected color (orange tinted).
+    assert_ne!(colors[0], colors[3]);
+}
+
+

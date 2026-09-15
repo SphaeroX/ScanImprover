@@ -267,14 +267,8 @@ fn sync_scene(
     // --- Mesh geometry / visibility / colors ---------------------------
     if scan.mesh_dirty {
         if let Some(m) = scan.display().cloned() {
-            if scene.mesh_generation != scan.mesh_generation
-                || scene.groups_generation != scan.groups_generation
-            {
-                // Vertices are also split where the face group changes so
-                // group colors are exact per face.
-                let keys = (scan.group_ids.len() == m.triangle_count())
-                    .then_some(scan.group_ids.as_slice());
-                let split = CreaseSplit::build(&m, CREASE_COS, keys);
+            if scene.mesh_generation != scan.mesh_generation {
+                let split = CreaseSplit::build_per_face(&m, CREASE_COS);
                 let mut mesh = Mesh::new(
                     PrimitiveTopology::TriangleList,
                     RenderAssetUsages::default(),
@@ -311,7 +305,7 @@ fn sync_scene(
         scan.mesh_dirty = false;
         scan.wire_dirty = true;
     }
-    if (scan.aux_dirty || scan.sel_dirty)
+    if (scan.aux_dirty || scan.sel_dirty || scene.groups_generation != scan.groups_generation)
         && has_mesh
         && scene.mesh_generation == scan.mesh_generation
     {
@@ -322,6 +316,7 @@ fn sync_scene(
                 VertexAttributeValues::Float32x4(colors),
             );
         }
+        scene.groups_generation = scan.groups_generation;
         scan.aux_dirty = false;
         scan.sel_dirty = false;
     }
@@ -690,6 +685,117 @@ impl CreaseSplit {
             indices,
         }
     }
+
+    /// Builds render vertices per corner (one per face corner) while preserving
+    /// crease-group smoothed normals across shared edges within the crease angle.
+    /// This enables exact per-face colors (e.g. face selection, face groups) with
+    /// hard edges and without color bleeding/interpolation into adjacent faces.
+    pub fn build_per_face(mesh: &ScanMesh, crease_cos: f32) -> CreaseSplit {
+        let nv = mesh.positions.len();
+        let nt = mesh.triangle_count();
+        let total_corners = mesh.indices.len();
+        if nv == 0 || nt == 0 || total_corners == 0 {
+            return CreaseSplit {
+                render_to_mesh: (0..nv as u32).collect(),
+                render_to_face: vec![0; nv],
+                normals: mesh.normals.clone(),
+                indices: mesh.indices.clone(),
+            };
+        }
+        // Area-weighted face normals.
+        let face_n: Vec<GVec3> = (0..nt)
+            .into_par_iter()
+            .map(|t| {
+                let [a, b, c] = mesh.triangle(t);
+                (b - a).cross(c - a)
+            })
+            .collect();
+        // CSR vertex -> incident corners (triangle * 3 + k).
+        let mut offsets = vec![0u32; nv + 1];
+        for &i in &mesh.indices {
+            offsets[i as usize + 1] += 1;
+        }
+        for v in 0..nv {
+            offsets[v + 1] += offsets[v];
+        }
+        let mut fill = vec![0u32; nv];
+        let mut corners = vec![0u32; total_corners];
+        for (ci, &v) in mesh.indices.iter().enumerate() {
+            let v = v as usize;
+            corners[offsets[v] as usize + fill[v] as usize] = ci as u32;
+            fill[v] += 1;
+        }
+        // Per corner: calculate smoothed normal from incident faces within crease angle.
+        let mut corner_normals = vec![[0.0f32; 3]; total_corners];
+        (0..nv)
+            .into_par_iter()
+            .map(|v| {
+                let cs = &corners[offsets[v] as usize..offsets[v + 1] as usize];
+                let n = cs.len();
+                let mut parent: Vec<u32> = (0..n as u32).collect();
+                fn find(p: &mut [u32], mut x: u32) -> u32 {
+                    while p[x as usize] != x {
+                        let g = p[x as usize];
+                        p[x as usize] = p[g as usize];
+                        x = g;
+                    }
+                    x
+                }
+                let unit: Vec<GVec3> = cs
+                    .iter()
+                    .map(|&c| face_n[c as usize / 3].normalize_or_zero())
+                    .collect();
+                for i in 0..n {
+                    for j in i + 1..n {
+                        if unit[i].dot(unit[j]) >= crease_cos {
+                            let (a, b) = (find(&mut parent, i as u32), find(&mut parent, j as u32));
+                            if a != b {
+                                parent[a as usize] = b;
+                            }
+                        }
+                    }
+                }
+                let mut root_sum: Vec<(u32, GVec3)> = Vec::new();
+                let roots: Vec<u32> = (0..n).map(|i| find(&mut parent, i as u32)).collect();
+                for (i, &c) in cs.iter().enumerate() {
+                    let r = roots[i];
+                    match root_sum.iter_mut().find(|(root, _)| *root == r) {
+                        Some((_, sum)) => *sum += face_n[c as usize / 3],
+                        None => root_sum.push((r, face_n[c as usize / 3])),
+                    }
+                }
+                let mut local_normals = Vec::with_capacity(n);
+                for (i, &c) in cs.iter().enumerate() {
+                    let r = roots[i];
+                    let sum = root_sum.iter().find(|(root, _)| *root == r).unwrap().1;
+                    let nrm = if sum.length_squared() > 1e-20 {
+                        sum.normalize().to_array()
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    };
+                    local_normals.push((c, nrm));
+                }
+                local_normals
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|locals| {
+                for (c, nrm) in locals {
+                    corner_normals[c as usize] = nrm;
+                }
+            });
+
+        let render_to_mesh: Vec<u32> = mesh.indices.clone();
+        let render_to_face: Vec<u32> = (0..total_corners as u32).map(|ci| ci / 3).collect();
+        let indices: Vec<u32> = (0..total_corners as u32).collect();
+
+        CreaseSplit {
+            render_to_mesh,
+            render_to_face,
+            normals: corner_normals,
+            indices,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -783,5 +889,26 @@ mod tests {
         assert_eq!(m.count_vertices(), 3);
         assert_eq!(srgb_to_linear([1.0, 0.0, 0.5, 0.3])[0], 1.0);
         assert!(srgb_to_linear([0.5, 0.0, 0.0, 1.0])[0] < 0.25);
+    }
+
+    #[test]
+    fn build_per_face_creates_corners_with_consistent_normals() {
+        let flat = ScanMesh::from_indexed(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![0, 1, 2, 1, 3, 2],
+        );
+        let split = CreaseSplit::build_per_face(&flat, CREASE_COS);
+        assert_eq!(split.render_to_mesh.len(), 6);
+        assert_eq!(split.render_to_face, vec![0, 0, 0, 1, 1, 1]);
+        assert_eq!(split.indices, vec![0, 1, 2, 3, 4, 5]);
+        for n in &split.normals {
+            let n = GVec3::from(*n);
+            assert!((n - GVec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
+        }
     }
 }

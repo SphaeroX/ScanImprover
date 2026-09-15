@@ -673,7 +673,7 @@ impl App {
         };
         let nv = m.vertex_count();
         let nt = m.triangle_count();
-        let sel = self.build_vertex_selection().unwrap_or_default();
+        let sel_ok = self.sel.len() == nt;
         let groups_on =
             self.groups_show && !self.face_groups.is_empty() && self.group_ids.len() == nt;
         let heat = self
@@ -687,8 +687,9 @@ impl App {
             .zip(render_to_face.par_iter())
             .map(|(&mv, &face)| {
                 let mv = mv as usize;
-                let gid = if groups_on && (face as usize) < nt {
-                    self.group_ids[face as usize]
+                let face_idx = face as usize;
+                let gid = if groups_on && face_idx < nt {
+                    self.group_ids[face_idx]
                 } else {
                     -1
                 };
@@ -706,28 +707,15 @@ impl App {
                 if gid >= 0 && hover == Some(gid) {
                     col = mix(col, [1.0, 1.0, 1.0], 0.45);
                 }
-                if sel.get(mv).is_some_and(|&s| s > 0.75) {
+                if sel_ok
+                    && face_idx < nt
+                    && self.sel[face_idx] > 0
+                    && !self.is_face_hidden(face_idx as u32)
+                {
                     col = mix(col, [1.0, 0.45, 0.10], 0.55);
                 }
                 crate::render::srgb_to_linear([col[0], col[1], col[2], 1.0])
             })
             .collect()
-    }
-
-    /// Per-vertex GPU selection weights.
-    pub(crate) fn build_vertex_selection(&self) -> Option<Vec<f32>> {
-        let m = self.display()?;
-        let nv = m.vertex_count();
-        let mut sel = vec![0.0f32; nv];
-        if self.sel.len() == m.triangle_count() {
-            for t in 0..m.triangle_count() {
-                if self.sel[t] > 0 && !self.is_face_hidden(t as u32) {
-                    for k in 0..3 {
-                        sel[m.indices[3 * t + k] as usize] = 1.0;
-                    }
-                }
-            }
-        }
-        Some(sel)
     }
 }
