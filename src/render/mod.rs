@@ -493,6 +493,9 @@ pub fn wireframe_lines(
     color: [f32; 4],
 ) -> Vec<LineVertex> {
     let nt = mesh.triangle_count();
+    // Triangles of quads skip the diagonal (their a-c edge), so the
+    // wireframe shows the quad edges.
+    let quad_tris = 2 * mesh.quad_count();
     let mut keys: Vec<u64> = (0..nt)
         .into_par_iter()
         .filter(|&t| !hidden_mask.is_some_and(|m| t < m.len() && m[t]))
@@ -500,7 +503,17 @@ pub fn wireframe_lines(
             let i0 = mesh.indices[3 * t];
             let i1 = mesh.indices[3 * t + 1];
             let i2 = mesh.indices[3 * t + 2];
+            // (a, b, c) drops edge 2 (c-a), (a, c, d) drops edge 0 (a-c).
+            let skip = match t {
+                t if t >= quad_tris => 3,
+                t if t % 2 == 0 => 2,
+                _ => 0,
+            };
             [edge_key(i0, i1), edge_key(i1, i2), edge_key(i2, i0)]
+                .into_iter()
+                .enumerate()
+                .filter(move |&(k, _)| k != skip)
+                .map(|(_, e)| e)
         })
         .collect();
     keys.par_sort_unstable();
@@ -837,6 +850,24 @@ mod tests {
         let hidden = [true, false];
         let lines = wireframe_lines(&m, Some(&hidden), [1.0; 4]);
         assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn wireframe_hides_quad_diagonals() {
+        // Quad (0,1,3,2) followed by a plain triangle (1,4,3).
+        let mut m = ScanMesh::from_indexed(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ],
+            vec![0, 1, 3, 0, 3, 2, 1, 4, 3],
+        );
+        assert_eq!(wireframe_lines(&m, None, [1.0; 4]).len(), 2 * 7);
+        m.set_quad_layout(1);
+        assert_eq!(wireframe_lines(&m, None, [1.0; 4]).len(), 2 * 6);
     }
 
     #[test]

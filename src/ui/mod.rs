@@ -3,9 +3,11 @@
 pub mod accordion;
 pub mod alignment;
 pub mod bridge;
+pub mod experimental;
 pub mod gizmo;
 pub mod object_browser;
 pub mod repair;
+pub mod retopo;
 pub mod sections;
 pub mod selection_hud;
 pub mod settings;
@@ -26,16 +28,18 @@ pub enum ToolSection {
     Coordinates,
     Repair,
     Decimation,
+    Experimental,
 }
 
 impl ToolSection {
-    const ALL: [ToolSection; 6] = [
+    const ALL: [ToolSection; 7] = [
         ToolSection::Symmetry,
         ToolSection::Selection,
         ToolSection::FaceGroups,
         ToolSection::Coordinates,
         ToolSection::Repair,
         ToolSection::Decimation,
+        ToolSection::Experimental,
     ];
 
     pub fn key(self) -> &'static str {
@@ -46,6 +50,7 @@ impl ToolSection {
             ToolSection::Coordinates => "coordinates",
             ToolSection::Repair => "repair",
             ToolSection::Decimation => "decimation",
+            ToolSection::Experimental => "experimental",
         }
     }
 
@@ -61,6 +66,7 @@ impl ToolSection {
             ToolSection::Coordinates => "Coordinate system",
             ToolSection::Repair => "Mesh repair",
             ToolSection::Decimation => "Decimation",
+            ToolSection::Experimental => "Experimental",
         }
     }
 }
@@ -86,6 +92,7 @@ fn section_badge(app: &App, section: ToolSection) -> Option<String> {
             }
         }
         ToolSection::Decimation => app.preview.as_ref().map(|_| "Preview active".to_string()),
+        ToolSection::Experimental => None,
     }
 }
 
@@ -100,6 +107,7 @@ fn section_busy(app: &App, section: ToolSection) -> bool {
             app.analysis_job.is_some() || app.edit_job.is_some() || app.solve_job.is_some()
         }
         ToolSection::Decimation => app.dec_job.is_some() || app.dev_job.is_some(),
+        ToolSection::Experimental => false,
     }
 }
 
@@ -130,6 +138,7 @@ pub fn render_left_panel(app: &mut App, ui: &mut egui::Ui) {
                         ToolSection::Coordinates => sections::render_coordinates(app, ui),
                         ToolSection::Repair => repair::render_repair(app, ui),
                         ToolSection::Decimation => sections::render_decimation(app, ui),
+                        ToolSection::Experimental => experimental::render_experimental(app, ui),
                     });
                 }
                 ui.add_space(3.0);
