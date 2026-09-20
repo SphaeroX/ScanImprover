@@ -324,17 +324,18 @@ pub fn unify_normals(mesh: &Mesh) -> Mesh {
 
     let mut indices = mesh.indices.clone();
 
-    // Map directed edge to triangle index
-    // Edge (u, v) -> tri_idx
-    let mut edge_to_tri: HashMap<(u32, u32), u32> = HashMap::with_capacity(nt * 3);
+    // Undirected edge -> triangles using it. A directed-edge map keeps only
+    // one of two triangles that run an edge the same way, which is exactly
+    // the seam around a wrongly wound region (e.g. a filled hole patch).
+    let mut edge_tris: HashMap<EdgeKey, Vec<u32>> = HashMap::with_capacity(nt * 3 / 2);
     for t in 0..nt {
-        let i0 = indices[3 * t];
-        let i1 = indices[3 * t + 1];
-        let i2 = indices[3 * t + 2];
-        let t_u32 = t as u32;
-        edge_to_tri.insert((i0, i1), t_u32);
-        edge_to_tri.insert((i1, i2), t_u32);
-        edge_to_tri.insert((i2, i0), t_u32);
+        for k in 0..3 {
+            let (u, v) = (indices[3 * t + k], indices[3 * t + (k + 1) % 3]);
+            edge_tris
+                .entry(EdgeKey::new(u, v))
+                .or_default()
+                .push(t as u32);
+        }
     }
 
     let mut visited = vec![false; nt];
@@ -352,30 +353,24 @@ pub fn unify_normals(mesh: &Mesh) -> Mesh {
         comp_tris.push(start_t);
 
         while let Some(t) = queue.pop_front() {
-            let i0 = indices[3 * t];
-            let i1 = indices[3 * t + 1];
-            let i2 = indices[3 * t + 2];
-
-            let edges = [(i0, i1), (i1, i2), (i2, i0)];
-            for (u, v) in edges {
-                // Compatible neighbor triangle has edge (v, u)
-                if let Some(&nb) = edge_to_tri.get(&(v, u)) {
+            for k in 0..3 {
+                let (u, v) = (indices[3 * t + k], indices[3 * t + (k + 1) % 3]);
+                for &nb in &edge_tris[&EdgeKey::new(u, v)] {
                     let nb_idx = nb as usize;
-                    if !visited[nb_idx] {
-                        visited[nb_idx] = true;
-                        queue.push_back(nb_idx);
-                        comp_tris.push(nb_idx);
+                    if visited[nb_idx] {
+                        continue;
                     }
-                } else if let Some(&nb) = edge_to_tri.get(&(u, v)) {
-                    // Conflicting neighbor triangle has edge (u, v) in SAME direction -> flip neighbor!
-                    let nb_idx = nb as usize;
-                    if !visited[nb_idx] {
-                        // Flip triangle winding
+                    // `t` is already oriented: a compatible neighbour runs the
+                    // shared edge as (v, u), one running it as (u, v) is flipped.
+                    let same_direction = (0..3).any(|j| {
+                        indices[3 * nb_idx + j] == u && indices[3 * nb_idx + (j + 1) % 3] == v
+                    });
+                    if same_direction {
                         indices.swap(3 * nb_idx + 1, 3 * nb_idx + 2);
-                        visited[nb_idx] = true;
-                        queue.push_back(nb_idx);
-                        comp_tris.push(nb_idx);
                     }
+                    visited[nb_idx] = true;
+                    queue.push_back(nb_idx);
+                    comp_tris.push(nb_idx);
                 }
             }
         }
@@ -583,5 +578,81 @@ mod tests {
         ];
         let m = Mesh::from_indexed(positions, vec![0, 1, 2, 1, 3, 2]);
         assert_eq!(count_non_manifold_vertices(&m), 0);
+    }
+
+    #[test]
+    fn unify_normals_flips_a_reversed_region_as_a_whole() {
+        // Octahedron with every face split into four, wound outwards...
+        let mut positions: Vec<[f32; 3]> = vec![
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        let mut mids: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut mid = |a: u32, b: u32, positions: &mut Vec<[f32; 3]>| {
+            *mids.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                let (p, q) = (
+                    Vec3::from(positions[a as usize]),
+                    Vec3::from(positions[b as usize]),
+                );
+                positions.push(((p + q) * 0.5).to_array());
+                positions.len() as u32 - 1
+            })
+        };
+        let mut indices = Vec::new();
+        for (sx, x) in [(1.0, 0), (-1.0, 1)] {
+            for (sy, y) in [(1.0, 2), (-1.0, 3)] {
+                for (sz, z) in [(1.0, 4), (-1.0, 5)] {
+                    let [a, b, c] = if sx * sy * sz > 0.0 {
+                        [x, y, z]
+                    } else {
+                        [x, z, y]
+                    };
+                    let (ab, bc, ca) = (
+                        mid(a, b, &mut positions),
+                        mid(b, c, &mut positions),
+                        mid(c, a, &mut positions),
+                    );
+                    let mut tris = [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]];
+                    // ...except the upper half, wound inwards as one piece (a
+                    // hole patch wound against its rim): the middle
+                    // triangles touch only reversed triangles.
+                    if sz > 0.0 {
+                        for t in &mut tris {
+                            t.swap(1, 2);
+                        }
+                    }
+                    indices.extend(tris.iter().flatten());
+                }
+            }
+        }
+        // Away from the origin (like a scanned part) the signed volume of the
+        // reversed piece alone says nothing about its orientation.
+        for offset in [Vec3::new(0.0, 0.0, -100.0), Vec3::new(0.0, 0.0, 100.0)] {
+            let shifted = positions
+                .iter()
+                .map(|&p| (Vec3::from(p) + offset).to_array())
+                .collect();
+            let m = Mesh::from_indexed(shifted, indices.clone());
+            assert_eq!(analyze_mesh(&m).inconsistent_normals, 8);
+
+            let fixed = unify_normals(&m);
+            let rep = analyze_mesh(&fixed);
+            assert_eq!(rep.inconsistent_normals, 0, "offset {offset}");
+            assert!(rep.is_watertight);
+            let volume: f32 = fixed
+                .indices
+                .chunks_exact(3)
+                .map(|t| {
+                    let [a, b, c] =
+                        [0, 1, 2].map(|k| Vec3::from(fixed.positions[t[k] as usize]) - offset);
+                    a.dot(b.cross(c))
+                })
+                .sum();
+            assert!(volume > 0.0, "inside out at offset {offset}: {volume}");
+        }
     }
 }
