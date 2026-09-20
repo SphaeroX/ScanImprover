@@ -13,6 +13,7 @@
 //! * [`overlay`]   – line / fill primitive builders for the viewport
 
 mod features;
+mod guided_fill;
 mod history;
 pub(crate) mod overlay;
 mod repair;
@@ -308,6 +309,11 @@ pub struct App {
     pub(crate) bridge_status: Option<String>,
     pub(crate) bridge_cluster_cache: Option<BridgeClusterCache>,
 
+    // --- Guided hole fill (Experimental) ------------------------------------
+    pub(crate) guided_density: f32,
+    pub(crate) guided_preview_active: bool,
+    pub(crate) guided_preview: Option<guided_fill::GuidedPreview>,
+
     // --- View / UI state ----------------------------------------------------
     pub(crate) show_mesh: bool,
     pub(crate) show_object_browser: bool,
@@ -448,6 +454,9 @@ impl App {
             bridge_preview_patch: None,
             bridge_status: None,
             bridge_cluster_cache: None,
+            guided_density: 1.0,
+            guided_preview_active: true,
+            guided_preview: None,
             show_mesh: true,
             show_object_browser: true,
             show_wireframe: false,

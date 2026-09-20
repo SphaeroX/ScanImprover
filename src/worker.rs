@@ -10,6 +10,7 @@ use crate::decimate;
 use crate::geom::bvh::Bvh;
 use crate::geom::distance::{self, Deviation};
 use crate::geom::freeform::{FreeformFitData, FreeformParams, fit_freeform};
+use crate::geom::guided_fill::GuidedBatch;
 use crate::geom::hole_detect::HoleLoop;
 use crate::geom::hole_solver::HoleSolveResult;
 use crate::geom::repair::MeshHealthReport;
@@ -112,6 +113,9 @@ pub enum TaskOutput {
     },
     HoleSolve {
         result: Result<HoleSolveResult, String>,
+    },
+    GuidedFill {
+        batch: Box<GuidedBatch>,
     },
     Exported {
         result: Result<String, String>,
